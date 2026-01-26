@@ -1,5 +1,7 @@
 from fastapi import FastAPI, Depends, WebSocket, HTTPException, Form, File, UploadFile, Request, Query, BackgroundTasks
-from fastapi.responses import Response, HTMLResponse
+from fastapi.responses import Response, HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -10,7 +12,7 @@ from typing import Optional
 from sqlalchemy.orm import selectinload
 from loguru import logger
 from models import User, Agent, Conversation, MenuItem, EventBooking, Base
-from voice_agent import run_voice_bot
+from voice_agent import run_voice_bot, run_human_voice_demo
 from fastapi.middleware.cors import CORSMiddleware
 from uuid import uuid4
 from datetime import datetime
@@ -18,6 +20,7 @@ import json
 
 # Bot demo imports
 from bot_demo import DualBotService, list_personas
+from bot_demo.persona_loader import load_persona as load_bot_persona
 
 # Pipecat bot demo imports
 from bot_demo_pipecat import PipecatDualBotService, list_personas as pipecat_list_personas
@@ -70,6 +73,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Mount static files for the voice client
+VOICE_CLIENT_DIST = Path(__file__).parent / "client" / "outrival-voice-client" / "dist" / "assets"
+if VOICE_CLIENT_DIST.exists():
+    app.mount("/human-demo/assets", StaticFiles(directory=VOICE_CLIENT_DIST), name="human-demo-assets")
 
 async def get_db():
     async with AsyncSessionLocal() as session:
@@ -2034,6 +2042,519 @@ async def pipecat_demo_viewer_page():
         // Initialize on page load
         loadPersonas();
         connect();
+    </script>
+</body>
+</html>
+    """
+    return Response(
+        content=html_content,
+        media_type="text/html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+    )
+
+
+# ========== HUMAN-TO-AGENT VOICE DEMO ==========
+
+@app.get("/human-demo/personas")
+async def get_human_demo_personas():
+    """Get list of available Alice personas for human demo."""
+    personas = list_personas()  # Returns {"alice": [...], "bob": [...]}
+
+    result = []
+    for filename in personas.get("alice", []):
+        try:
+            persona = load_bot_persona(filename)
+            result.append({
+                "filename": filename,
+                "name": persona.name,
+                "role": persona.role,
+                "company": persona.company_name,
+            })
+        except Exception as e:
+            logger.warning(f"Failed to load persona {filename}: {e}")
+
+    return {"personas": result}
+
+
+@app.websocket("/human-demo/ws/{persona_name}")
+async def human_demo_websocket(websocket: WebSocket, persona_name: str):
+    """WebSocket endpoint for human-to-agent voice conversation."""
+    await websocket.accept()
+
+    try:
+        # Load the persona
+        persona = load_bot_persona(persona_name)
+        if not persona:
+            logger.error(f"Persona not found: {persona_name}")
+            await websocket.close(code=1008, reason="Persona not found")
+            return
+
+        # Generate ephemeral session ID
+        session_id = str(uuid4())
+
+        logger.info(f"Human demo started: persona={persona.name}, session={session_id}")
+
+        await run_human_voice_demo(
+            websocket_client=websocket,
+            persona=persona,
+            session_id=session_id,
+        )
+
+    except FileNotFoundError as e:
+        logger.error(f"Persona file not found: {persona_name}")
+        try:
+            await websocket.close(code=1008, reason="Persona not found")
+        except:
+            pass
+    except Exception as e:
+        logger.exception(f"Human demo WebSocket error: {e}")
+    finally:
+        try:
+            if websocket.client_state.name != "DISCONNECTED":
+                await websocket.close()
+        except:
+            pass
+        logger.info(f"Human demo WebSocket closed for persona={persona_name}")
+
+
+@app.get("/human-demo/viewer")
+async def human_demo_viewer_page():
+    """Serve the human-to-agent voice demo viewer HTML page."""
+    html_content = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Talk to Alice - Voice Demo</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #e4e4e7;
+            padding: 20px;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 10px;
+            color: #34d399;
+        }
+        .subtitle {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #a1a1aa;
+            font-size: 14px;
+        }
+        .persona-selector {
+            background: #27272a;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .persona-selector label {
+            display: block;
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 10px;
+            color: #a1a1aa;
+        }
+        select {
+            width: 100%;
+            padding: 14px 16px;
+            border: 2px solid #3f3f46;
+            border-radius: 8px;
+            background: #18181b;
+            color: #e4e4e7;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        select:focus {
+            outline: none;
+            border-color: #34d399;
+        }
+        .persona-info {
+            margin-top: 12px;
+            padding: 12px;
+            background: #18181b;
+            border-radius: 8px;
+            font-size: 13px;
+            color: #a1a1aa;
+        }
+        .persona-info .name {
+            color: #34d399;
+            font-weight: 600;
+            font-size: 15px;
+        }
+        .controls {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        button {
+            flex: 1;
+            padding: 16px 24px;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-connect {
+            background: linear-gradient(135deg, #059669 0%, #34d399 100%);
+            color: white;
+        }
+        .btn-connect:hover:not(:disabled) {
+            opacity: 0.9;
+            transform: translateY(-1px);
+        }
+        .btn-connect:disabled {
+            background: #3f3f46;
+            cursor: not-allowed;
+        }
+        .btn-disconnect {
+            background: #ef4444;
+            color: white;
+        }
+        .btn-disconnect:hover:not(:disabled) {
+            background: #dc2626;
+        }
+        .btn-disconnect:disabled {
+            background: #3f3f46;
+            cursor: not-allowed;
+        }
+        .status-panel {
+            background: #27272a;
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+        }
+        .status-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 20px;
+            border-radius: 24px;
+            font-weight: 600;
+            margin-bottom: 16px;
+        }
+        .status-indicator.disconnected {
+            background: #3f3f46;
+            color: #a1a1aa;
+        }
+        .status-indicator.connecting {
+            background: #fbbf24;
+            color: #1a1a2e;
+        }
+        .status-indicator.connected {
+            background: #34d399;
+            color: #1a1a2e;
+        }
+        .status-indicator.error {
+            background: #ef4444;
+            color: white;
+        }
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+        .status-indicator.connected .status-dot {
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.6; transform: scale(1.2); }
+        }
+        .mic-status {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 10px;
+            border-radius: 8px;
+            background: #18181b;
+            font-size: 14px;
+        }
+        .mic-icon {
+            font-size: 20px;
+        }
+        .mic-status.active {
+            background: linear-gradient(135deg, #059669 0%, #34d399 100%);
+            color: white;
+        }
+        .instructions {
+            margin-top: 20px;
+            padding: 16px;
+            background: #18181b;
+            border-radius: 8px;
+            font-size: 13px;
+            color: #71717a;
+            line-height: 1.6;
+        }
+        .instructions h3 {
+            color: #a1a1aa;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+        .instructions ul {
+            margin-left: 20px;
+        }
+        .instructions li {
+            margin-bottom: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Talk to Alice</h1>
+        <p class="subtitle">Have a voice conversation with an AI customer service agent</p>
+
+        <div class="persona-selector">
+            <label>Select a persona:</label>
+            <select id="personaSelect" onchange="updatePersonaInfo()">
+                <option value="">Loading personas...</option>
+            </select>
+            <div id="personaInfo" class="persona-info" style="display: none;"></div>
+        </div>
+
+        <div class="controls">
+            <button id="connectBtn" class="btn-connect" onclick="connect()">Connect</button>
+            <button id="disconnectBtn" class="btn-disconnect" onclick="disconnect()" disabled>Disconnect</button>
+        </div>
+
+        <div class="status-panel">
+            <div id="statusIndicator" class="status-indicator disconnected">
+                <span class="status-dot"></span>
+                <span id="statusText">Disconnected</span>
+            </div>
+            <div id="micStatus" class="mic-status">
+                <span class="mic-icon">🎤</span>
+                <span>Microphone inactive</span>
+            </div>
+        </div>
+
+        <div class="instructions">
+            <h3>How to use:</h3>
+            <ul>
+                <li>Select a persona from the dropdown</li>
+                <li>Click "Connect" to start the conversation</li>
+                <li>Allow microphone access when prompted</li>
+                <li>Speak naturally - Alice will respond</li>
+                <li>Say "goodbye" to end the conversation</li>
+            </ul>
+        </div>
+    </div>
+
+    <script type="module" src="/human-demo/assets/index-DOzFJ6E1.js"></script>
+    <script type="module">
+        // Wait for the bundle to load, then use its exports
+        // The bundle exposes PipecatClient, WebSocketTransport, ProtobufFrameSerializer globally
+
+        let client = null;
+        let personas = [];
+        let PipecatClient, WebSocketTransport, ProtobufFrameSerializer;
+
+        // Dynamic import from the bundle - we need to wait for it
+        async function initLibraries() {
+            // Import from the bundled module
+            const clientModule = await import('/human-demo/assets/index-DOzFJ6E1.js');
+            // The bundle exports everything we need
+            return clientModule;
+        }
+
+        // Load personas on page load
+        async function loadPersonas() {
+            try {
+                const response = await fetch('/human-demo/personas');
+                const data = await response.json();
+                personas = data.personas;
+
+                const select = document.getElementById('personaSelect');
+                select.innerHTML = '';
+
+                personas.forEach((persona, index) => {
+                    const option = document.createElement('option');
+                    option.value = persona.filename;
+                    option.textContent = persona.name + ' - ' + persona.role;
+                    if (index === 0) option.selected = true;
+                    select.appendChild(option);
+                });
+
+                updatePersonaInfo();
+            } catch (error) {
+                console.error('Error loading personas:', error);
+                document.getElementById('personaSelect').innerHTML = '<option value="">Error loading personas</option>';
+            }
+        }
+
+        window.updatePersonaInfo = function() {
+            const select = document.getElementById('personaSelect');
+            const infoDiv = document.getElementById('personaInfo');
+            const filename = select.value;
+
+            const persona = personas.find(p => p.filename === filename);
+            if (persona) {
+                infoDiv.innerHTML = '<div class="name">' + persona.name + '</div>' +
+                    '<div>' + persona.role + '</div>' +
+                    '<div>' + persona.company + '</div>';
+                infoDiv.style.display = 'block';
+            } else {
+                infoDiv.style.display = 'none';
+            }
+        }
+
+        function setStatus(status, text) {
+            const indicator = document.getElementById('statusIndicator');
+            const statusText = document.getElementById('statusText');
+            indicator.className = 'status-indicator ' + status;
+            statusText.textContent = text;
+        }
+
+        function setMicStatus(active) {
+            const micStatus = document.getElementById('micStatus');
+            if (active) {
+                micStatus.className = 'mic-status active';
+                micStatus.innerHTML = '<span class="mic-icon">🎤</span><span>Microphone active - speak now</span>';
+            } else {
+                micStatus.className = 'mic-status';
+                micStatus.innerHTML = '<span class="mic-icon">🎤</span><span>Microphone inactive</span>';
+            }
+        }
+
+        function setButtons(connected) {
+            document.getElementById('connectBtn').disabled = connected;
+            document.getElementById('disconnectBtn').disabled = !connected;
+            document.getElementById('personaSelect').disabled = connected;
+        }
+
+        function log(msg) {
+            console.log(msg);
+            // Also show in a log panel if it exists
+            const logEl = document.getElementById('logPanel');
+            if (logEl) {
+                logEl.textContent += msg + '\\n';
+                logEl.scrollTop = logEl.scrollHeight;
+            }
+        }
+
+        window.connect = async function() {
+            const personaFilename = document.getElementById('personaSelect').value;
+            if (!personaFilename) {
+                alert('Please select a persona');
+                return;
+            }
+
+            setStatus('connecting', 'Connecting...');
+            setButtons(true);
+
+            try {
+                // Dynamically import from the bundle
+                const { PipecatClient, WebSocketTransport, ProtobufFrameSerializer } = await import('https://esm.run/@pipecat-ai/client-js@1.5.0');
+                const wsTransport = await import('https://esm.run/@pipecat-ai/websocket-transport@1.5.0');
+
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = protocol + '//' + window.location.host + '/human-demo/ws/' + personaFilename;
+
+                log('Connecting to: ' + wsUrl);
+
+                client = new PipecatClient({
+                    transport: new wsTransport.WebSocketTransport({
+                        serializer: new wsTransport.ProtobufFrameSerializer(),
+                        recorderSampleRate: 16000,
+                        playerSampleRate: 24000,  // Gemini Live native audio outputs at 24kHz
+                    }),
+                    enableCam: false,
+                    enableMic: true,
+                    callbacks: {
+                        onBotConnected: () => {
+                            setStatus('connected', 'Connected');
+                            log('[bot] connected');
+                        },
+                        onBotReady: () => {
+                            setStatus('connected', 'Connected - Alice is ready');
+                            setMicStatus(true);
+                            log('[bot] ready (start talking)');
+                        },
+                        onBotDisconnected: () => {
+                            setStatus('disconnected', 'Disconnected');
+                            setMicStatus(false);
+                            setButtons(false);
+                            client = null;
+                            log('[bot] disconnected');
+                        },
+                        onDisconnected: () => {
+                            setStatus('disconnected', 'Disconnected');
+                            setMicStatus(false);
+                            setButtons(false);
+                            client = null;
+                            log('[disconnected]');
+                        },
+                        onTransportStateChanged: (state) => {
+                            log('[transport state] ' + state);
+                            if (state === 'disconnected' || state === 'error') {
+                                setStatus('disconnected', 'Disconnected');
+                                setMicStatus(false);
+                                setButtons(false);
+                                client = null;
+                            }
+                        },
+                        onUserTranscript: (t) => {
+                            const text = t?.text ?? t?.transcript ?? '';
+                            if (text) log('[you] ' + text);
+                        },
+                        onBotTranscript: (t) => {
+                            const text = t?.text ?? t?.transcript ?? '';
+                            if (text) log('[alice] ' + text);
+                        },
+                        onError: (e) => {
+                            log('[error] ' + (e?.message ?? String(e)));
+                            setStatus('error', 'Error: ' + (e?.message ?? 'Unknown error'));
+                            setMicStatus(false);
+                            setButtons(false);
+                        },
+                    },
+                });
+
+                await client.connect({ wsUrl });
+
+            } catch (error) {
+                console.error('Connection error:', error);
+                log('[error] ' + error.message);
+                setStatus('error', 'Failed to connect: ' + error.message);
+                setMicStatus(false);
+                setButtons(false);
+                client = null;
+            }
+        }
+
+        window.disconnect = async function() {
+            if (client) {
+                try {
+                    await client.disconnect();
+                } catch (error) {
+                    console.error('Disconnect error:', error);
+                }
+                client = null;
+            }
+            setStatus('disconnected', 'Disconnected');
+            setMicStatus(false);
+            setButtons(false);
+        }
+
+        // Initialize on page load
+        loadPersonas();
     </script>
 </body>
 </html>

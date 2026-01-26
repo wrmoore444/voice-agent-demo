@@ -1,4 +1,5 @@
 import sys
+import asyncio
 from dotenv import load_dotenv
 from loguru import logger
 from pipecat.services.llm_service import FunctionCallParams
@@ -69,26 +70,44 @@ tools_schema = ToolsSchema(standard_tools=[
 DEFAULT_SYSTEM_INSTRUCTION = """You are a helpful AI voice assistant. 
 Engage naturally in conversation, answer questions clearly, and be friendly and professional.
 
-IMPORTANT GUIDELINES:
-• ENDING THE CALL:
-If the user requests to end the call, politely acknowledge (e.g., say goodbye) and then immediately call the `end_conversation` function. Keep the closing concise—do not prolong or exaggerate the farewell.
-Take the user's consent into consideration before ending the call.
+ENDING THE CALL:
+You have access to an `end_conversation` function that disconnects the call. You MUST call this function to end the call properly.
+
+When to call `end_conversation`:
+- After the customer says goodbye, thank you, or indicates they're done (e.g., "bye", "thanks, that's all", "have a good day", "I'm all set")
+- After YOU have said your brief farewell
+
+How to end the call:
+1. Say a brief, warm goodbye (e.g., "Have a great day!" or "Thank you for calling, goodbye!")
+2. IMMEDIATELY call the `end_conversation` function - do NOT wait for another response
+
+IMPORTANT: Once goodbyes have been exchanged, call `end_conversation` right away. Do not continue talking or ask additional questions after the customer has said goodbye.
 """
 
 
 def create_voice_system_instruction(agent_prompt: str = None, agent_name: str = None):
     """Create system instruction from agent's custom prompt or use default"""
+    end_call_instructions = """
+
+ENDING THE CALL:
+You have access to an `end_conversation` function that disconnects the call. You MUST call this function to end the call properly.
+
+When to call `end_conversation`:
+- After the customer says goodbye, thank you, or indicates they're done (e.g., "bye", "thanks, that's all", "have a good day", "I'm all set")
+- After YOU have said your brief farewell
+
+How to end the call:
+1. Say a brief, warm goodbye (e.g., "Have a great day!" or "Thank you for calling, goodbye!")
+2. IMMEDIATELY call the `end_conversation` function - do NOT wait for another response
+
+IMPORTANT: Once goodbyes have been exchanged, call `end_conversation` right away. Do not continue talking or ask additional questions after the customer has said goodbye.
+"""
     if agent_prompt:
         # Use the agent's custom prompt
         instruction = agent_prompt
         if agent_name:
-            instruction = f"""
-            You are {agent_name}.\n\n{instruction}
-            • ENDING THE CALL:
-            If the user requests to end the call, politely acknowledge (e.g., say goodbye) and then immediately call the `end_conversation` function. Keep the closing concise—do not prolong or exaggerate the farewell.
-            Take the user's consent into consideration before ending the call.
-            """
-        return instruction
+            instruction = f"You are {agent_name}.\n\n{instruction}"
+        return instruction + end_call_instructions
     else:
         # Use default instruction with agent name if provided
         if agent_name:
@@ -541,6 +560,205 @@ async def run_voice_bot(
 
         # SmallWebRTCTransport exposes join info; return it for the client.
         return transport.get_connection_info()
+
+    runner = PipelineRunner(handle_sigint=False)
+    await runner.run(task)
+
+
+async def run_human_voice_demo(
+    websocket_client,
+    persona,  # Persona object from persona_loader
+    session_id: str,
+):
+    """
+    Run a simplified voice demo for human-to-agent conversations.
+
+    Args:
+        websocket_client: WebSocket connection
+        persona: Persona object with generate_system_prompt() method
+        session_id: Ephemeral session identifier for logging
+    """
+    # Generate system instruction from persona
+    SYSTEM_INSTRUCTION = persona.generate_system_prompt()
+
+    # Add end conversation handling
+    SYSTEM_INSTRUCTION += """
+
+ENDING THE CALL:
+You have access to an `end_conversation` function that disconnects the call. You MUST call this function to end the call properly.
+
+When to call `end_conversation`:
+- After the customer says goodbye, thank you, or indicates they're done (e.g., "bye", "thanks, that's all", "have a good day", "I'm all set")
+- After YOU have said your brief farewell
+
+How to end the call:
+1. Say a brief, warm goodbye (e.g., "Have a great day!" or "Thank you for calling, goodbye!")
+2. IMMEDIATELY call the `end_conversation` function - do NOT wait for another response
+
+IMPORTANT: Once goodbyes have been exchanged, call `end_conversation` right away. Do not continue talking or ask additional questions after the customer has said goodbye.
+"""
+
+    logger.info(f"Human voice demo starting with persona '{persona.name}' (session: {session_id})")
+    logger.debug(f"System instruction: {SYSTEM_INSTRUCTION[:200]}...")
+
+    # Task reference for the end_conversation handler
+    task_ref = {"task": None}
+
+    async def end_conversation_handler(params: FunctionCallParams):
+        """Handle conversation end - closes the connection"""
+        logger.info(f"end_conversation called for session {session_id}")
+
+        # Return result first to acknowledge the function call
+        await params.result_callback(
+            {"status": "ok"}, properties=FunctionCallResultProperties(run_llm=False)
+        )
+
+        # Cancel the task to stop the pipeline and close websocket
+        if task_ref["task"]:
+            logger.info(f"Cancelling task for session {session_id}")
+            await task_ref["task"].cancel()
+
+        logger.info(f"Human voice demo ended for session {session_id}")
+
+    ws_transport = FastAPIWebsocketTransport(
+        websocket=websocket_client,
+        params=FastAPIWebsocketParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            add_wav_header=False,
+            vad_analyzer=SileroVADAnalyzer(),
+            serializer=ProtobufFrameSerializer(),
+        ),
+    )
+
+    llm = GeminiLiveLLMService(
+        api_key=os.getenv("GEMINI_API_KEY"),
+        model="models/gemini-2.5-flash-native-audio-preview-09-2025",
+        voice_id="Aoede",
+        system_instruction=SYSTEM_INSTRUCTION,
+        tools=tools_schema,
+        transcribe_model_audio=True,
+        transcribe_user_audio=True,
+        params=InputParams(
+            temperature=0.7,
+            modalities=GeminiModalities.AUDIO,
+            language=Language.EN_US,
+        ),
+    )
+    logger.info(f"GeminiLiveLLMService initialized for human demo")
+
+    llm.register_function("end_conversation", end_conversation_handler)
+
+    messages = [
+        {
+            "role": "user",
+            "content": "Please introduce yourself briefly."
+        }
+    ]
+    context = OpenAILLMContext(messages)
+    context_aggregator = llm.create_context_aggregator(context)
+
+    transcript = TranscriptProcessor()
+    rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
+
+    pipeline = Pipeline([
+        ws_transport.input(),
+        rtvi,
+        context_aggregator.user(),
+        transcript.user(),
+        llm,
+        transcript.assistant(),
+        ws_transport.output(),
+        context_aggregator.assistant(),
+    ])
+
+    task = PipelineTask(
+        pipeline,
+        params=PipelineParams(
+            allow_interruptions=True,
+            interruption_strategy=MinWordsInterruptionStrategy(min_words=2),
+            enable_metrics=True,
+            enable_usage_metrics=True,
+        ),
+        observers=[RTVIObserver(rtvi)],
+    )
+
+    # Store task reference for the end_conversation handler
+    task_ref["task"] = task
+
+    @rtvi.event_handler("on_client_ready")
+    async def on_client_ready(rtvi):
+        logger.info(f"Human voice demo ready - Persona: {persona.name}")
+        await rtvi.set_bot_ready()
+        await task.queue_frames([LLMRunFrame()])
+
+    @ws_transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        logger.info(f"Client connected to human demo (persona: {persona.name})")
+        await task.queue_frames([LLMRunFrame()])
+
+    @llm.event_handler("on_connection_established")
+    async def on_llm_connected(service):
+        logger.info(f"✓ Gemini Live connection ESTABLISHED for human demo")
+
+    @llm.event_handler("on_connection_lost")
+    async def on_llm_disconnected(service):
+        logger.error(f"✗ Gemini Live connection LOST for human demo")
+
+    @llm.event_handler("on_error")
+    async def on_llm_error(service, error):
+        logger.error(f"✗ Gemini Live ERROR for human demo: {error}")
+
+    async def delayed_disconnect():
+        """Wait for audio to finish playing, then disconnect"""
+        await asyncio.sleep(2.5)  # Give time for goodbye audio to play
+        logger.info(f"[Demo] Auto-disconnecting after goodbye exchange")
+        if task_ref["task"]:
+            await task_ref["task"].cancel()
+
+    # Track if we're in goodbye mode
+    goodbye_state = {"user_said_bye": False, "ended": False}
+
+    @transcript.event_handler("on_transcript_update")
+    async def on_transcript_update(processor, frame):
+        """Log transcriptions and detect goodbye to auto-disconnect"""
+        for msg in frame.messages:
+            if isinstance(msg, TranscriptionMessage):
+                timestamp = f"[{msg.timestamp}] " if msg.timestamp else ""
+                line = f"{timestamp}{msg.role}: {msg.content}"
+                logger.info(f"[Demo Transcript] {line}")
+
+                content_lower = msg.content.lower().strip()
+
+                # Detect user saying goodbye
+                if msg.role == "user":
+                    goodbye_words = [
+                        "bye", "goodbye", "talk to you later", "gotta go", "have to go",
+                        "i'm all set", "that's all", "thanks, bye", "call you back",
+                        "call you right back", "got to go", "need to go", "heading out",
+                        "that's it for now", "i'm done", "all set"
+                    ]
+                    if any(word in content_lower for word in goodbye_words):
+                        goodbye_state["user_said_bye"] = True
+                        logger.info(f"[Demo] User said goodbye, waiting for agent response")
+
+                # If user said bye and now agent responds with goodbye, disconnect
+                if msg.role == "assistant" and goodbye_state["user_said_bye"] and not goodbye_state["ended"]:
+                    agent_goodbye_words = [
+                        "goodbye", "bye", "have a great day", "have a wonderful day",
+                        "take care", "talk to you later", "thank you for calling",
+                        "thanks for calling", "have a good day", "have a nice day",
+                        "call back", "reach out", "anytime"
+                    ]
+                    if any(word in content_lower for word in agent_goodbye_words):
+                        goodbye_state["ended"] = True
+                        logger.info(f"[Demo] Agent said goodbye after user - scheduling disconnect")
+                        # Schedule disconnect after a short delay to let the audio finish
+                        asyncio.create_task(delayed_disconnect())
+
+    @ws_transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        logger.info(f"Client disconnected from human demo (persona: {persona.name})")
 
     runner = PipelineRunner(handle_sigint=False)
     await runner.run(task)

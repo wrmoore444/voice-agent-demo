@@ -994,9 +994,9 @@ async def demo_viewer_websocket(websocket: WebSocket):
             pass
 
 
-@app.get("/demo/viewer", response_class=HTMLResponse)
+@app.get("/demo/viewer")
 async def demo_viewer_page():
-    """Serve the demo viewer HTML page."""
+    """Serve the demo viewer HTML page with no-cache headers."""
     html_content = """
 <!DOCTYPE html>
 <html lang="en">
@@ -1505,7 +1505,11 @@ async def demo_viewer_page():
 </body>
 </html>
     """
-    return HTMLResponse(content=html_content)
+    return Response(
+        content=html_content,
+        media_type="text/html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+    )
 
 
 # ========== PIPECAT BOT-TO-BOT DEMO ==========
@@ -1601,9 +1605,9 @@ async def pipecat_demo_viewer_websocket(websocket: WebSocket):
             pass
 
 
-@app.get("/pipecat-demo/viewer", response_class=HTMLResponse)
+@app.get("/pipecat-demo/viewer")
 async def pipecat_demo_viewer_page():
-    """Serve the Pipecat demo viewer HTML page."""
+    """Serve the Pipecat demo viewer HTML page with no-cache headers."""
     html_content = """
 <!DOCTYPE html>
 <html lang="en">
@@ -2034,4 +2038,8 @@ async def pipecat_demo_viewer_page():
 </body>
 </html>
     """
-    return HTMLResponse(content=html_content)
+    return Response(
+        content=html_content,
+        media_type="text/html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+    )

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, WebSocket, HTTPException, Form, File, UploadFile, Request, Query
+from fastapi import FastAPI, Depends, WebSocket, HTTPException, Form, File, UploadFile, Request, Query, BackgroundTasks
 from fastapi.responses import Response, HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -2043,3 +2043,80 @@ async def pipecat_demo_viewer_page():
         media_type="text/html",
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
     )
+
+
+# ========== EXPERIMENTAL: PERSONA TESTING ==========
+# This section can be safely removed without affecting main functionality
+
+from bot_demo_pipecat.persona_tester import (
+    run_persona_test,
+    list_test_results,
+    load_test_result,
+    find_customer_personas_for_agent,
+)
+
+@app.post("/persona-test/run/{agent_persona}")
+async def run_persona_test_endpoint(agent_persona: str, background_tasks: BackgroundTasks):
+    """
+    Run automated tests for an agent against all matching customer personas.
+
+    This runs in the background and saves results to JSON files.
+    """
+    # Validate agent exists
+    try:
+        from bot_demo_pipecat.persona_loader import load_persona
+        load_persona(agent_persona)
+    except FileNotFoundError:
+        raise HTTPException(404, f"Agent persona not found: {agent_persona}")
+
+    # Check for matching customers
+    customers = find_customer_personas_for_agent(agent_persona)
+    if not customers:
+        raise HTTPException(400, f"No customer personas found for {agent_persona}")
+
+    # Run test in background
+    background_tasks.add_task(run_persona_test, agent_persona)
+
+    return {
+        "status": "started",
+        "agent_persona": agent_persona,
+        "customer_personas": customers,
+        "message": f"Testing against {len(customers)} customer personas. Check /persona-test/results for output."
+    }
+
+
+@app.get("/persona-test/results")
+async def list_persona_test_results():
+    """List all available test result files."""
+    return {"results": list_test_results()}
+
+
+@app.get("/persona-test/results/{filename}")
+async def get_persona_test_result(filename: str):
+    """Get a specific test result."""
+    result = load_test_result(filename)
+    if not result:
+        raise HTTPException(404, f"Result not found: {filename}")
+    return result
+
+
+@app.get("/persona-test/agents")
+async def list_testable_agents():
+    """List all agent personas that can be tested."""
+    from bot_demo_pipecat.persona_loader import PERSONAS_DIR
+
+    agents = []
+    for file in PERSONAS_DIR.glob("alice_*.json"):
+        customers = find_customer_personas_for_agent(file.name)
+        agents.append({
+            "filename": file.name,
+            "customer_count": len(customers),
+            "customers": customers
+        })
+
+    return {"agents": agents}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8001)

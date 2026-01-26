@@ -1,0 +1,512 @@
+import sys
+from dotenv import load_dotenv
+from loguru import logger
+from pipecat.services.llm_service import FunctionCallParams
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.runner import PipelineRunner
+from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from email_utils import send_call_summary_email
+from pipecat.transports.websocket.fastapi import (
+    FastAPIWebsocketParams,
+    FastAPIWebsocketTransport,
+)
+from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+from pipecat.processors.frame_processor import FrameDirection
+from pipecat.transcriptions.language import Language
+from pipecat.frames.frames import TTSSpeakFrame, EndTaskFrame,LLMRunFrame,TranscriptionMessage
+from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.frames.frames import FunctionCallResultProperties
+import os
+from pipecat.serializers.protobuf import ProtobufFrameSerializer
+from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
+from pipecat.audio.interruptions.min_words_interruption_strategy import (
+    MinWordsInterruptionStrategy,
+)
+from pipecat.processors.transcript_processor import TranscriptProcessor
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.services.google.gemini_live.llm import (
+    GeminiLiveLLMService,
+    InputParams,
+    GeminiModalities,
+)
+from datapoint_extractor import extract_datapoints_from_conversation
+import logging
+import sys
+from loguru import logger as loguru_logger
+
+load_dotenv(override=True)
+loguru_logger.remove()
+
+LOG_FORMAT = "%(levelname)s - %(name)s - %(message)s"
+
+logging.basicConfig(
+    level=logging.INFO,  # Change to DEBUG, WARNING, ERROR as needed
+    format=LOG_FORMAT,
+    handlers=[
+        logging.StreamHandler(sys.stdout),  # Logs to console
+    ],
+)
+logger = logging.getLogger("inbound-ai")
+
+
+end_conversation_fn = FunctionSchema(
+    name="end_conversation",
+    description="use this function to end the conversation when the user say goodbye, take the user consent into consideration before ending the call",
+    properties={
+    },
+    required=[],
+)
+
+tools_schema = ToolsSchema(standard_tools=[
+    end_conversation_fn
+])
+
+
+# Default prompt if agent doesn't have one configured
+DEFAULT_SYSTEM_INSTRUCTION = """You are a helpful AI voice assistant. 
+Engage naturally in conversation, answer questions clearly, and be friendly and professional.
+
+IMPORTANT GUIDELINES:
+• ENDING THE CALL:
+If the user requests to end the call, politely acknowledge (e.g., say goodbye) and then immediately call the `end_conversation` function. Keep the closing concise—do not prolong or exaggerate the farewell.
+Take the user's consent into consideration before ending the call.
+"""
+
+
+def create_voice_system_instruction(agent_prompt: str = None, agent_name: str = None):
+    """Create system instruction from agent's custom prompt or use default"""
+    if agent_prompt:
+        # Use the agent's custom prompt
+        instruction = agent_prompt
+        if agent_name:
+            instruction = f"""
+            You are {agent_name}.\n\n{instruction}
+            • ENDING THE CALL:
+            If the user requests to end the call, politely acknowledge (e.g., say goodbye) and then immediately call the `end_conversation` function. Keep the closing concise—do not prolong or exaggerate the farewell.
+            Take the user's consent into consideration before ending the call.
+            """
+        return instruction
+    else:
+        # Use default instruction with agent name if provided
+        if agent_name:
+            return f"You are {agent_name}, a helpful AI voice assistant.\n\n{DEFAULT_SYSTEM_INSTRUCTION}"
+        return DEFAULT_SYSTEM_INSTRUCTION
+
+
+async def run_voice_bot(
+    websocket_client,
+    agent_prompt: str = None,
+    agent_name: str = None,
+    user_id: int = None,
+    agent_id: int = None,
+    db_session= None,
+    current_conversation_id: int = None,
+):
+    """
+    Run voice bot with agent-specific configuration
+
+    Args:
+        websocket_client: WebSocket connection
+        agent_prompt: Custom prompt from the Agent model
+        agent_name: Name of the agent
+        user_id: ID of the user
+        agent_id: ID of the agent
+        db_session: Database session for saving data
+        current_conversation_id: Active conversation ID
+    """
+    transcription_buffer = []
+    conversation_ended = False  # Flag to track if conversation has ended
+    BATCH_SIZE = 10  # Save transcriptions every 10 messages to prevent memory buildup
+
+    # Create dynamic system instruction with agent's custom prompt
+    SYSTEM_INSTRUCTION = create_voice_system_instruction(agent_prompt, agent_name)
+
+    logger.info(f"Voice bot starting with agent '{agent_name}' (ID: {agent_id}) for user {user_id}")
+    logger.debug(f"System instruction: {SYSTEM_INSTRUCTION[:200]}...")
+
+    async def save_transcription_batch(batch_to_save):
+        """Save a batch of transcriptions to database and clear memory"""
+        if not batch_to_save:
+            return
+
+        logger.info(f"Saving batch of {len(batch_to_save)} transcriptions to database...")
+
+        try:
+            from models import Conversation, Transcription
+            from sqlalchemy import select
+            from datetime import datetime
+
+            if not db_session or not db_session.is_active:
+                logger.error("Database session is not active, cannot save transcriptions")
+                return
+
+            result = await db_session.execute(
+                select(Conversation).filter(Conversation.uuid == current_conversation_id)
+            )
+            conversation = result.scalar_one_or_none()
+
+            if not conversation:
+                logger.error(f"Conversation {current_conversation_id} not found")
+                return
+
+            transcriptions_to_add = []
+            for trans_data in batch_to_save:
+                transcription = Transcription(
+                    conversation_id=conversation.id,
+                    text=trans_data["text"],
+                    speaker=trans_data["speaker"],
+                    timestamp=trans_data["timestamp"] or datetime.utcnow()
+                )
+                transcriptions_to_add.append(transcription)
+
+            db_session.add_all(transcriptions_to_add)
+            await db_session.commit()
+
+            # CRITICAL: Expunge all objects to prevent memory leak
+            db_session.expunge_all()
+
+            # Clear the batch data from memory
+            batch_to_save.clear()
+            transcriptions_to_add.clear()
+
+            logger.info(f"Successfully saved and cleared {len(transcriptions_to_add)} transcriptions from memory")
+
+        except Exception as e:
+            logger.error(f"Failed to save transcription batch: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            try:
+                if db_session and db_session.is_active:
+                    await db_session.rollback()
+            except:
+                pass
+
+    async def save_all_transcriptions():
+        """Save remaining buffered transcriptions to database using a fresh session"""
+        if not transcription_buffer:
+            logger.info("No transcriptions to save")
+            return
+
+        logger.info(f"Saving final {len(transcription_buffer)} transcriptions to database...")
+        
+        try:
+            from models import Conversation, Transcription
+            from sqlalchemy import select
+            from datetime import datetime
+            from main import AsyncSessionLocal  # Import your session factory
+            
+            # Create a fresh database session for final save
+            async with AsyncSessionLocal() as fresh_session:
+                result = await fresh_session.execute(
+                    select(Conversation).filter(Conversation.uuid == current_conversation_id)
+                )
+                conversation = result.scalar_one_or_none()
+
+                if not conversation:
+                    logger.error(f"Conversation {current_conversation_id} not found")
+                    transcription_buffer.clear()
+                    return
+
+                transcriptions_to_add = []
+                for trans_data in transcription_buffer:
+                    transcription = Transcription(
+                        conversation_id=conversation.id,
+                        text=trans_data["text"],
+                        speaker=trans_data["speaker"],
+                        timestamp=trans_data["timestamp"] or datetime.utcnow()
+                    )
+                    transcriptions_to_add.append(transcription)
+
+                fresh_session.add_all(transcriptions_to_add)
+                await fresh_session.commit()
+                
+                logger.info(f"Successfully saved final {len(transcriptions_to_add)} transcriptions")
+                
+        except Exception as e:
+            logger.error(f"Failed to save final transcriptions: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+        finally:
+            transcription_buffer.clear()
+
+
+    async def extract_and_email_datapoints():
+        """Extract datapoints and send email - separate from transcription save"""
+        if not db_session or not db_session.is_active:
+            logger.error("Database session is not active, cannot extract datapoints")
+            return
+
+        logger.info(f"Extracting datapoints for conversation {current_conversation_id}")
+        transcription_list = []
+        try:
+            from models import Conversation, Transcription
+            from sqlalchemy import select
+
+            # Get conversation
+            result = await db_session.execute(
+                select(Conversation).filter(Conversation.uuid == current_conversation_id)
+            )
+            conversation = result.scalar_one_or_none()
+
+            if conversation:
+                # Get transcriptions using conversation_id (not uuid)
+                trans_result = await db_session.execute(
+                    select(Transcription)
+                    .filter(Transcription.conversation_id == conversation.id)
+                    .order_by(Transcription.timestamp)
+                )
+                transcriptions = trans_result.scalars().all()
+
+                transcription_list = [
+                    {
+                        "timestamp": t.timestamp.isoformat(),
+                        "speaker": t.speaker,
+                        "text": t.text
+                    }
+                    for t in transcriptions
+                ]
+
+                # CRITICAL: Expunge to free memory from ORM objects
+                db_session.expunge_all()
+
+            # Extract datapoints
+            datapoints = await extract_datapoints_from_conversation(
+                conversation_uuid=current_conversation_id,
+                db=db_session,
+                agent_prompt=agent_prompt
+            )
+            logger.info(f"Datapoints extracted successfully: {datapoints.get('conversation_summary', 'N/A')}")
+
+            # Send email
+            await send_call_summary_email(
+                recipient_email='bill@aijoe.ai',
+                transcription=transcription_list,
+                datapoints=datapoints,
+                agent_name=agent_name,
+                conversation_uuid=current_conversation_id
+            )
+
+            # Clear transcription list from memory
+            transcription_list.clear()
+
+        except Exception as e:
+            logger.error(f"Failed to extract datapoints or send email: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+        finally:
+            # Ensure cleanup even on error
+            if transcription_list:
+                transcription_list.clear()
+
+
+    async def cleanup_resources():
+        """Cleanup in-memory buffers and other resources to avoid leaks."""
+        nonlocal transcription_buffer
+
+        try:
+            # Clear buffers
+            transcription_buffer.clear()
+
+            # Expunge all remaining ORM objects from session
+            if db_session and db_session.is_active:
+                db_session.expunge_all()
+
+            logger.info("Transcription buffer and session objects cleared from memory")
+
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+
+    async def end_conversation_handler(params: FunctionCallParams):
+        """Handle conversation end and extract datapoints"""
+        nonlocal conversation_ended
+
+        if conversation_ended:
+            logger.info("Conversation already ended, skipping duplicate end")
+            return
+
+        # Lock immediately so disconnect handler won't run in parallel
+        conversation_ended = True
+
+        response = "Thank you for your time today! Feel free to reach out whenever you're ready. Have a great day!"
+
+        await params.llm.push_frame(TTSSpeakFrame(response))
+        await params.llm.push_frame(EndTaskFrame(), FrameDirection.UPSTREAM)
+        await params.result_callback(
+            {"status": "ok"}, properties=FunctionCallResultProperties(run_llm=False)
+        )
+
+        await save_all_transcriptions()
+        await extract_and_email_datapoints()
+        await cleanup_resources()
+
+
+
+    ws_transport = FastAPIWebsocketTransport(
+        websocket=websocket_client,
+        params=FastAPIWebsocketParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            add_wav_header=False,
+            vad_analyzer=SileroVADAnalyzer(),
+            serializer=ProtobufFrameSerializer(),
+        ),
+    )
+
+
+    llm = GeminiLiveLLMService(
+        api_key=os.getenv("GEMINI_API_KEY", "AIzaSyCIFSS8c9-oxJ6i8d3yfYYcNscs-jgFFiE"),
+        model="models/gemini-2.5-flash-native-audio-preview-09-2025",
+        voice_id="Aoede",
+        system_instruction=SYSTEM_INSTRUCTION,
+        tools=tools_schema,
+        transcribe_model_audio=True,
+        transcribe_user_audio=True,
+        params=InputParams(
+            temperature=0.7,
+            modalities=GeminiModalities.TEXT if agent_id == 3 else GeminiModalities.AUDIO,
+            language=Language.EN_US,
+        ),
+    )
+    logger.info(f"GeminiLiveLLMService initialized with model: gemini-2.5-flash-native-audio-preview-09-2025")
+
+    # Replace the current tts initialization with:
+    if agent_id == 3:
+        tts = ElevenLabsTTSService(
+            api_key="c6fc74ef63c5e6c1d49fa124e844706f",
+            voice_id="JqGxQpW2LXaAdDhV6cHT",
+            model="eleven_flash_v2_5",
+            params=ElevenLabsTTSService.InputParams(
+                language=Language.EN,
+                stability=0.7,
+                similarity_boost=0.8,
+                style=0.5,
+                use_speaker_boost=True,
+                speed=1.1,
+            ),
+        )
+    else:
+        tts = None  # No TTS for other agents
+
+    # Replace the current pipeline definition with:
+
+    llm.register_function("end_conversation", end_conversation_handler) 
+    messages=[
+        {
+          "role": "user",
+          "content": "Please introduce yourself briefly."
+        }
+    ]
+    context = OpenAILLMContext(messages)
+    
+    from pipecat.processors.aggregators.llm_response import LLMUserAggregatorParams
+
+    context_aggregator = llm.create_context_aggregator(
+        context,
+    )
+    transcript = TranscriptProcessor()
+    rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
+
+    if agent_id == 3:
+        pipeline = Pipeline([
+            ws_transport.input(),
+            rtvi,
+            context_aggregator.user(),
+            transcript.user(),  
+            llm,
+            tts,
+            transcript.assistant(),
+            ws_transport.output(),
+            context_aggregator.assistant(),
+        ])
+    else:
+        pipeline = Pipeline([
+            ws_transport.input(),
+            rtvi,
+            context_aggregator.user(),
+            transcript.user(),  
+            llm,
+            transcript.assistant(),
+            ws_transport.output(),
+            context_aggregator.assistant(),
+        ])
+        
+    task = PipelineTask(
+        pipeline,
+        params=PipelineParams(
+            allow_interruptions=True,
+            interruption_strategy=MinWordsInterruptionStrategy(min_words=2),
+            enable_metrics=True,
+            enable_usage_metrics=True,
+        ),
+        observers=[RTVIObserver(rtvi)],
+    )
+
+    @rtvi.event_handler("on_client_ready")
+    async def on_client_ready(rtvi):
+        logger.info(f"Voice bot ready - Agent: {agent_name} (User: {user_id})")
+        await rtvi.set_bot_ready()
+        await task.queue_frames([LLMRunFrame()])
+
+    @ws_transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        logger.info(f"Client connected to agent {agent_name} (ID: {agent_id})")
+        await task.queue_frames([LLMRunFrame()])
+
+    @llm.event_handler("on_connection_established")
+    async def on_llm_connected(service):
+        logger.info(f"✓ Gemini Live connection ESTABLISHED for agent {agent_name}")
+
+    @llm.event_handler("on_connection_lost")
+    async def on_llm_disconnected(service):
+        logger.error(f"✗ Gemini Live connection LOST for agent {agent_name}")
+
+    @llm.event_handler("on_error")
+    async def on_llm_error(service, error):
+        logger.error(f"✗ Gemini Live ERROR for agent {agent_name}: {error}")
+
+    @transcript.event_handler("on_transcript_update")
+    async def on_transcript_update(processor, frame):
+        """Collect transcriptions in memory and save in batches to prevent memory leak"""
+        for msg in frame.messages:
+            if isinstance(msg, TranscriptionMessage):
+                timestamp = f"[{msg.timestamp}] " if msg.timestamp else ""
+                line = f"{timestamp}{msg.role}: {msg.content}"
+
+                # Store in memory
+                transcription_buffer.append({
+                    "text": msg.content,
+                    "speaker": msg.role,
+                    "timestamp": msg.timestamp
+                })
+
+                logger.info(f"Transcript buffered: {line}")
+
+                # Save in batches to prevent memory buildup
+                if len(transcription_buffer) >= BATCH_SIZE:
+                    logger.info(f"Buffer reached {BATCH_SIZE} items, saving batch...")
+                    await save_transcription_batch(transcription_buffer.copy())
+                    transcription_buffer.clear()
+
+    @ws_transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        """Handle client disconnect - save transcriptions and extract datapoints"""
+        nonlocal conversation_ended
+
+        if conversation_ended:
+            logger.info("Conversation already ended, skipping disconnect processing")
+            return
+
+        # Lock immediately
+        conversation_ended = True
+
+        logger.info(f"Client disconnected from agent {agent_name} (ID: {agent_id})")
+
+        await save_all_transcriptions()
+        await extract_and_email_datapoints()
+        await cleanup_resources()
+
+
+    runner = PipelineRunner(handle_sigint=False)
+    await runner.run(task)

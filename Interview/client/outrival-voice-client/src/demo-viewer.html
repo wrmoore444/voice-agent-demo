@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bot-to-Bot Conversation Viewer</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #e4e4e7;
+            padding: 20px;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 20px;
+            color: #a78bfa;
+        }
+        .subtitle {
+            text-align: center;
+            color: #71717a;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .server-input {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            justify-content: center;
+        }
+        input[type="text"] {
+            padding: 12px 16px;
+            border: 2px solid #3f3f46;
+            border-radius: 8px;
+            background: #27272a;
+            color: #e4e4e7;
+            font-size: 16px;
+            flex: 1;
+            min-width: 200px;
+        }
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #a78bfa;
+        }
+        #serverUrl {
+            max-width: 400px;
+        }
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-start {
+            background: #22c55e;
+            color: white;
+        }
+        .btn-start:hover {
+            background: #16a34a;
+        }
+        .btn-stop {
+            background: #ef4444;
+            color: white;
+        }
+        .btn-stop:hover {
+            background: #dc2626;
+        }
+        .btn-clear {
+            background: #3f3f46;
+            color: #e4e4e7;
+        }
+        .btn-clear:hover {
+            background: #52525b;
+        }
+        .btn-connect {
+            background: #3b82f6;
+            color: white;
+        }
+        .btn-connect:hover {
+            background: #2563eb;
+        }
+        .status {
+            text-align: center;
+            margin-bottom: 20px;
+            padding: 10px;
+            border-radius: 8px;
+            background: #27272a;
+        }
+        .status.connected {
+            border-left: 4px solid #22c55e;
+        }
+        .status.disconnected {
+            border-left: 4px solid #ef4444;
+        }
+        .status.connecting {
+            border-left: 4px solid #f59e0b;
+        }
+        .conversation {
+            background: #27272a;
+            border-radius: 12px;
+            padding: 20px;
+            min-height: 400px;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+        .message {
+            margin-bottom: 16px;
+            padding: 12px 16px;
+            border-radius: 12px;
+            max-width: 85%;
+            animation: fadeIn 0.3s ease;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .message.alice {
+            background: linear-gradient(135deg, #7c3aed 0%, #a78bfa 100%);
+            margin-right: auto;
+        }
+        .message.bob {
+            background: linear-gradient(135deg, #0891b2 0%, #22d3d1 100%);
+            margin-left: auto;
+        }
+        .message.system {
+            background: #3f3f46;
+            margin: 0 auto;
+            text-align: center;
+            font-style: italic;
+        }
+        .message .speaker {
+            font-weight: 700;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 4px;
+            opacity: 0.9;
+        }
+        .message .text {
+            line-height: 1.5;
+        }
+        .message .time {
+            font-size: 11px;
+            opacity: 0.7;
+            margin-top: 6px;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #71717a;
+        }
+        .empty-state p {
+            margin-bottom: 10px;
+        }
+        .bot-info {
+            display: flex;
+            justify-content: center;
+            gap: 40px;
+            margin-bottom: 20px;
+        }
+        .bot-card {
+            background: #27272a;
+            padding: 15px 25px;
+            border-radius: 10px;
+            text-align: center;
+        }
+        .bot-card.alice {
+            border-top: 3px solid #a78bfa;
+        }
+        .bot-card.bob {
+            border-top: 3px solid #22d3d1;
+        }
+        .bot-card .name {
+            font-weight: 700;
+            font-size: 18px;
+            margin-bottom: 5px;
+        }
+        .bot-card .details {
+            font-size: 12px;
+            color: #71717a;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Bot-to-Bot Conversation</h1>
+        <p class="subtitle">Watch two AI bots have a real-time conversation with each other</p>
+
+        <div class="bot-info">
+            <div class="bot-card alice">
+                <div class="name">Alice</div>
+                <div class="details">Voice: Kore (Female)<br>Curious & asks questions</div>
+            </div>
+            <div class="bot-card bob">
+                <div class="name">Bob</div>
+                <div class="details">Voice: Charon (Male)<br>Knowledgeable & shares facts</div>
+            </div>
+        </div>
+
+        <div class="server-input">
+            <input type="text" id="serverUrl" placeholder="Server URL" value="http://localhost:8000">
+            <button class="btn-connect" onclick="connectToServer()">Connect</button>
+        </div>
+
+        <div class="controls">
+            <input type="text" id="topic" placeholder="Enter conversation topic..." value="artificial intelligence">
+            <button class="btn-start" onclick="startDemo()">Start</button>
+            <button class="btn-stop" onclick="stopDemo()">Stop</button>
+            <button class="btn-clear" onclick="clearMessages()">Clear</button>
+        </div>
+
+        <div id="status" class="status disconnected">
+            Not connected - Enter server URL and click Connect
+        </div>
+
+        <div id="conversation" class="conversation">
+            <div class="empty-state">
+                <p>No conversation yet.</p>
+                <p>Connect to a server, enter a topic, and click Start to begin.</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let serverUrl = 'http://localhost:8000';
+        const conversationDiv = document.getElementById('conversation');
+        const statusDiv = document.getElementById('status');
+
+        function getWsUrl() {
+            const url = new URL(serverUrl);
+            const protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+            return `${protocol}//${url.host}/demo/viewer/ws`;
+        }
+
+        function connectToServer() {
+            serverUrl = document.getElementById('serverUrl').value.trim();
+            if (!serverUrl) {
+                alert('Please enter a server URL');
+                return;
+            }
+
+            if (ws) {
+                ws.close();
+            }
+
+            statusDiv.textContent = 'Connecting...';
+            statusDiv.className = 'status connecting';
+
+            try {
+                ws = new WebSocket(getWsUrl());
+
+                ws.onopen = () => {
+                    statusDiv.textContent = 'Connected - Watching conversation';
+                    statusDiv.className = 'status connected';
+                };
+
+                ws.onclose = () => {
+                    statusDiv.textContent = 'Disconnected - Click Connect to reconnect';
+                    statusDiv.className = 'status disconnected';
+                };
+
+                ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    statusDiv.textContent = 'Connection error - Check server URL';
+                    statusDiv.className = 'status disconnected';
+                };
+
+                ws.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+
+                    if (data.type === 'history') {
+                        if (data.data && data.data.length > 0) {
+                            conversationDiv.innerHTML = '';
+                            data.data.forEach(msg => addMessage(msg));
+                        }
+                    } else if (data.type === 'message') {
+                        addMessage(data.data);
+                    } else if (data.type === 'ping') {
+                        // Keepalive, ignore
+                    }
+                };
+            } catch (error) {
+                console.error('Error connecting:', error);
+                statusDiv.textContent = 'Failed to connect';
+                statusDiv.className = 'status disconnected';
+            }
+        }
+
+        function addMessage(msg) {
+            const emptyState = conversationDiv.querySelector('.empty-state');
+            if (emptyState) {
+                emptyState.remove();
+            }
+
+            const messageDiv = document.createElement('div');
+            const speakerClass = msg.speaker.toLowerCase() === 'alice' ? 'alice' :
+                                 msg.speaker.toLowerCase() === 'bob' ? 'bob' : 'system';
+            messageDiv.className = `message ${speakerClass}`;
+
+            const time = new Date(msg.timestamp).toLocaleTimeString();
+
+            messageDiv.innerHTML = `
+                <div class="speaker">${msg.speaker}</div>
+                <div class="text">${msg.text}</div>
+                <div class="time">${time}</div>
+            `;
+
+            conversationDiv.appendChild(messageDiv);
+            conversationDiv.scrollTop = conversationDiv.scrollHeight;
+        }
+
+        async function startDemo() {
+            const topic = document.getElementById('topic').value || 'artificial intelligence';
+            try {
+                const response = await fetch(`${serverUrl}/demo/start?topic=${encodeURIComponent(topic)}`, {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    statusDiv.textContent = `Started - Topic: ${topic}`;
+                    statusDiv.className = 'status connected';
+                } else {
+                    alert(data.detail || 'Failed to start demo');
+                }
+            } catch (error) {
+                console.error('Error starting demo:', error);
+                alert('Failed to start demo - Is the server running?');
+            }
+        }
+
+        async function stopDemo() {
+            try {
+                const response = await fetch(`${serverUrl}/demo/stop`, { method: 'POST' });
+                const data = await response.json();
+                if (response.ok) {
+                    statusDiv.textContent = 'Stopped';
+                } else {
+                    alert(data.detail || 'Failed to stop demo');
+                }
+            } catch (error) {
+                console.error('Error stopping demo:', error);
+                alert('Failed to stop demo');
+            }
+        }
+
+        function clearMessages() {
+            conversationDiv.innerHTML = `
+                <div class="empty-state">
+                    <p>No conversation yet.</p>
+                    <p>Connect to a server, enter a topic, and click Start to begin.</p>
+                </div>
+            `;
+        }
+
+        // Auto-connect on page load
+        window.onload = () => {
+            connectToServer();
+        };
+    </script>
+</body>
+</html>

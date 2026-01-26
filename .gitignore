@@ -32,3 +32,6 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+
+# Persona test results (generated)
+test_results/

@@ -35,3 +35,9 @@ build/
 
 # Persona test results (generated)
 test_results/
+
+# Database
+*.db
+
+# Node modules
+node_modules/

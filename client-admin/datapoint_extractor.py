@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 # Configure Gemini
-genai.configure(api_key=os.getenv("GEMINI_API_KEY", "AIzaSyCIFSS8c9-oxJ6i8d3yfYYcNscs-jgFFiE"))
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 
 async def extract_datapoints_from_conversation(

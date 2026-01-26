@@ -356,7 +356,7 @@ async def run_voice_bot(
 
 
     llm = GeminiLiveLLMService(
-        api_key=os.getenv("GEMINI_API_KEY", "AIzaSyCIFSS8c9-oxJ6i8d3yfYYcNscs-jgFFiE"),
+        api_key=os.getenv("GEMINI_API_KEY"),
         model="models/gemini-2.5-flash-native-audio-preview-09-2025",
         voice_id="Aoede",
         system_instruction=SYSTEM_INSTRUCTION,
@@ -374,8 +374,8 @@ async def run_voice_bot(
     # Replace the current tts initialization with:
     if agent_id == 3:
         tts = ElevenLabsTTSService(
-            api_key="c6fc74ef63c5e6c1d49fa124e844706f",
-            voice_id="JqGxQpW2LXaAdDhV6cHT",
+            api_key=os.getenv("ELEVENLABS_API_KEY"),
+            voice_id=os.getenv("ELEVENLABS_VOICE_ID", "JqGxQpW2LXaAdDhV6cHT"),
             model="eleven_flash_v2_5",
             params=ElevenLabsTTSService.InputParams(
                 language=Language.EN,

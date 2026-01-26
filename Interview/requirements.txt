@@ -1,0 +1,14 @@
+pipecat-ai[silero,websocket,google,local-smart-turn-v3]==0.0.92
+fastapi
+uvicorn
+elevenlabs
+websockets
+python-dotenv
+python-multipart
+aiohttp
+sqlalchemy
+aiosqlite
+aiomysql
+asyncpg
+aiosmtplib
+google-generativeai

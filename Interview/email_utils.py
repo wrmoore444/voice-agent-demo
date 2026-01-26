@@ -26,8 +26,8 @@ async def send_call_summary_email(
     """
     try:
         # Get Gmail credentials from environment
-        gmail_address = os.getenv("GMAIL_ADDRESS", "zk126128@gmail.com")
-        gmail_password = os.getenv("GMAIL_APP_PASSWORD", "atdw ehbe ptbc sqpo")
+        gmail_address = os.getenv("GMAIL_ADDRESS")
+        gmail_password = os.getenv("GMAIL_APP_PASSWORD")
         
         if not gmail_address or not gmail_password:
             logger.error("Gmail credentials not found in environment variables")

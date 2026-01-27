@@ -2,6 +2,9 @@
 
 This implementation uses Pipecat's GoogleLLMService for LLM inference
 with the run_inference() method for multi-turn conversations.
+
+TTS is handled via Pipecat's ElevenLabsTTSService running in a proper
+Pipeline for full Pipecat integration.
 """
 
 import asyncio
@@ -14,77 +17,186 @@ from loguru import logger
 
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.services.google.llm import GoogleLLMService
+from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+from pipecat.transcriptions.language import Language
+from pipecat.frames.frames import (
+    TTSSpeakFrame, AudioRawFrame, ErrorFrame,
+    TTSStartedFrame, TTSStoppedFrame, EndFrame, Frame
+)
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.task import PipelineTask, PipelineParams
+from pipecat.pipeline.runner import PipelineRunner
+from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 
 from .processors.bridge_processor import SharedBridgeState, BotMessage
 from .processors.turn_processor import TurnState
 from .persona_loader import load_persona, Persona, get_default_personas
 
 
-# Gemini voice IDs for TTS
-GEMINI_VOICES = {
-    "Alice": "Kore",    # Female voice
-    "Bob": "Charon",    # Male voice
-}
+# ElevenLabs voice IDs for TTS (configurable via environment variables)
+# See https://elevenlabs.io/voice-library for more voices
+# Defaults: Rachel (female, professional) for Alice, Antoni (male, conversational) for Bob
+def get_elevenlabs_voices() -> Dict[str, str]:
+    return {
+        "Alice": os.getenv("ELEVENLABS_VOICE_ID_ALICE", "21m00Tcm4TlvDq8ikWAM"),
+        "Bob": os.getenv("ELEVENLABS_VOICE_ID_BOB", "ErXwobaYiN019PkySvjV"),
+    }
 
 
-class GeminiTTS:
-    """Simple TTS using Gemini's audio generation capabilities (direct API)."""
+class AudioCollectorProcessor(FrameProcessor):
+    """
+    Custom FrameProcessor that collects audio frames from TTS output.
 
-    def __init__(self, voice_id: str = "Kore"):
-        self.voice_id = voice_id
-        self.api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    Listens for TTSStartedFrame/TTSStoppedFrame to track TTS job boundaries,
+    and collects AudioRawFrames in between.
+    """
 
-    async def synthesize(self, text: str, max_retries: int = 3) -> Optional[bytes]:
-        """Generate audio from text using Gemini with retry logic."""
-        from google import genai as google_genai
+    def __init__(self, speaker_name: str = "Bot"):
+        super().__init__()
+        self.speaker_name = speaker_name
+        self._audio_chunks: List[bytes] = []
+        self._is_collecting = False
+        self._tts_complete = asyncio.Event()
+        self._error: Optional[str] = None
 
-        if not text or not text.strip():
-            logger.warning("TTS called with empty text")
+    def reset(self):
+        """Reset state for a new TTS request."""
+        self._audio_chunks = []
+        self._is_collecting = False
+        self._tts_complete.clear()
+        self._error = None
+
+    async def wait_for_completion(self, timeout: float = 30.0) -> Optional[bytes]:
+        """Wait for TTS to complete and return the collected audio."""
+        try:
+            await asyncio.wait_for(self._tts_complete.wait(), timeout=timeout)
+            if self._error:
+                logger.warning(f"[{self.speaker_name}] TTS error: {self._error}")
+                return None
+            if self._audio_chunks:
+                combined = b''.join(self._audio_chunks)
+                return combined
+            return None
+        except asyncio.TimeoutError:
+            logger.warning(f"[{self.speaker_name}] TTS timeout")
             return None
 
-        client = google_genai.Client(api_key=self.api_key)
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        """Process frames from the TTS service."""
+        await super().process_frame(frame, direction)
 
-        for attempt in range(max_retries):
+        if isinstance(frame, TTSStartedFrame):
+            self._is_collecting = True
+
+        elif isinstance(frame, AudioRawFrame):
+            if self._is_collecting:
+                self._audio_chunks.append(frame.audio)
+
+        elif isinstance(frame, ErrorFrame):
+            self._error = str(frame.error)
+            logger.error(f"[{self.speaker_name}] TTS error: {self._error}")
+            self._tts_complete.set()
+
+        elif isinstance(frame, TTSStoppedFrame):
+            self._is_collecting = False
+            self._tts_complete.set()
+
+        # Pass frame downstream
+        await self.push_frame(frame, direction)
+
+
+class PipecatTTSPipeline:
+    """
+    Manages TTS using Pipecat's ElevenLabsTTSService.
+
+    Creates a fresh pipeline for each synthesis request because
+    ElevenLabsTTSService WebSocket doesn't process multiple TTSSpeakFrames
+    after the first one completes.
+    """
+
+    def __init__(self, voice_id: str, speaker_name: str = "Bot"):
+        self.voice_id = voice_id
+        self.speaker_name = speaker_name
+        self.api_key = os.getenv("ELEVENLABS_API_KEY")
+        self._is_running = False
+
+    async def start(self):
+        """Mark as ready."""
+        logger.info(f"[{self.speaker_name}] TTS pipeline ready (voice: {self.voice_id})")
+        self._is_running = True
+
+    async def stop(self):
+        """Mark as stopped."""
+        self._is_running = False
+        logger.info(f"[{self.speaker_name}] TTS pipeline stopped")
+
+    async def synthesize(self, text: str) -> Optional[bytes]:
+        """Synthesize text using a fresh Pipecat pipeline each time."""
+        if not self._is_running:
+            logger.warning(f"[{self.speaker_name}] TTS pipeline not running")
+            return None
+
+        if not text or not text.strip():
+            return None
+
+        try:
+            # Create fresh TTS service for each request
+            tts_service = ElevenLabsTTSService(
+                api_key=self.api_key,
+                voice_id=self.voice_id,
+                model="eleven_flash_v2_5",
+                params=ElevenLabsTTSService.InputParams(
+                    language=Language.EN,
+                    stability=0.7,
+                    similarity_boost=0.8,
+                ),
+            )
+
+            # Create collector
+            collector = AudioCollectorProcessor(speaker_name=self.speaker_name)
+
+            # Create pipeline
+            pipeline = Pipeline([tts_service, collector])
+
+            # Create task
+            task = PipelineTask(
+                pipeline,
+                params=PipelineParams(allow_interruptions=False, enable_metrics=False),
+            )
+
+            # Start pipeline runner
+            runner_done = asyncio.Event()
+
+            async def run_pipeline():
+                try:
+                    runner = PipelineRunner()
+                    await runner.run(task)
+                finally:
+                    runner_done.set()
+
+            runner_task = asyncio.create_task(run_pipeline())
+
+            # Wait for pipeline to initialize
+            await asyncio.sleep(0.1)
+
+            # Queue the text
+            await task.queue_frame(TTSSpeakFrame(text=text))
+
+            # Wait for audio
+            audio = await collector.wait_for_completion(timeout=30.0)
+
+            # Cleanup
+            await task.queue_frame(EndFrame())
             try:
-                response = await asyncio.to_thread(
-                    client.models.generate_content,
-                    model="gemini-2.5-flash-preview-tts",
-                    contents=text,
-                    config=google_genai.types.GenerateContentConfig(
-                        response_modalities=["AUDIO"],
-                        speech_config=google_genai.types.SpeechConfig(
-                            voice_config=google_genai.types.VoiceConfig(
-                                prebuilt_voice_config=google_genai.types.PrebuiltVoiceConfig(
-                                    voice_name=self.voice_id
-                                )
-                            )
-                        )
-                    )
-                )
+                await asyncio.wait_for(runner_done.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                runner_task.cancel()
 
-                # Extract audio data
-                if response.candidates and response.candidates[0].content.parts:
-                    for part in response.candidates[0].content.parts:
-                        if part.inline_data and part.inline_data.mime_type.startswith("audio/"):
-                            if attempt > 0:
-                                logger.info(f"TTS succeeded on retry {attempt + 1}")
-                            return part.inline_data.data
+            return audio
 
-                # If we got here, response was invalid - retry
-                if attempt < max_retries - 1:
-                    delay = (attempt + 1) * 0.5
-                    logger.info(f"TTS attempt {attempt + 1} failed, retrying in {delay}s...")
-                    await asyncio.sleep(delay)
-
-            except Exception as e:
-                logger.warning(f"TTS attempt {attempt + 1} error: {e}")
-                if attempt < max_retries - 1:
-                    delay = (attempt + 1) * 0.5
-                    await asyncio.sleep(delay)
-                else:
-                    logger.exception(f"TTS failed after {max_retries} attempts: {e}")
-
-        return None
+        except Exception as e:
+            logger.exception(f"[{self.speaker_name}] TTS error: {e}")
+            return None
 
 
 @dataclass
@@ -165,9 +277,13 @@ class PipecatDualBotService:
 
         # TTS (initialized on start if audio enabled)
         self._audio_enabled: bool = False
-        self._tts_alice: Optional[GeminiTTS] = None
-        self._tts_bob: Optional[GeminiTTS] = None
-        self._tts_queue: asyncio.Queue[TTSJob] = asyncio.Queue()
+        self._tts_alice: Optional[PipecatTTSPipeline] = None
+        self._tts_bob: Optional[PipecatTTSPipeline] = None
+        # Separate queues for parallel processing
+        self._tts_queue_alice: asyncio.Queue[TTSJob] = asyncio.Queue()
+        self._tts_queue_bob: asyncio.Queue[TTSJob] = asyncio.Queue()
+        self._tts_task_alice: Optional[asyncio.Task] = None
+        self._tts_task_bob: Optional[asyncio.Task] = None
         self._tts_sequence: int = 0
 
     async def start(
@@ -220,16 +336,25 @@ class PipecatDualBotService:
             self._audio_enabled = enable_audio
             self._tts_sequence = 0
             if enable_audio:
-                self._init_tts()
-                # Clear TTS queue
-                while not self._tts_queue.empty():
-                    try:
-                        self._tts_queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-                # Start TTS worker
-                self._tts_task = asyncio.create_task(self._tts_worker())
-                logger.info("TTS audio generation enabled")
+                elevenlabs_key = os.getenv("ELEVENLABS_API_KEY")
+                if not elevenlabs_key:
+                    raise ValueError("ELEVENLABS_API_KEY environment variable not set (required for audio)")
+                await self._init_tts()
+                # Clear TTS queues
+                for q in [self._tts_queue_alice, self._tts_queue_bob]:
+                    while not q.empty():
+                        try:
+                            q.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                # Start separate TTS workers for parallel processing
+                self._tts_task_alice = asyncio.create_task(
+                    self._tts_worker("Alice", self._tts_queue_alice, self._tts_alice)
+                )
+                self._tts_task_bob = asyncio.create_task(
+                    self._tts_worker("Bob", self._tts_queue_bob, self._tts_bob)
+                )
+                logger.info("ElevenLabs TTS audio generation enabled (via Pipecat, parallel)")
 
             # Start the orchestrator task
             self._orchestrator_task = asyncio.create_task(
@@ -254,17 +379,36 @@ class PipecatDualBotService:
         self.state.is_running = False
         self.turn_state.stop()
 
-        # Cancel tasks
-        for task in [self._orchestrator_task, self._tts_task]:
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await asyncio.wait_for(task, timeout=2.0)
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass
-
+        # Cancel orchestrator task
+        if self._orchestrator_task and not self._orchestrator_task.done():
+            self._orchestrator_task.cancel()
+            try:
+                await asyncio.wait_for(self._orchestrator_task, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
         self._orchestrator_task = None
-        self._tts_task = None
+
+        # Wait for TTS workers to finish processing queued jobs (with timeout)
+        for task in [self._tts_task_alice, self._tts_task_bob]:
+            if task and not task.done():
+                try:
+                    await asyncio.wait_for(task, timeout=30.0)
+                except asyncio.TimeoutError:
+                    logger.warning("TTS worker timed out, cancelling")
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+        self._tts_task_alice = None
+        self._tts_task_bob = None
+
+        # Stop TTS pipelines
+        if self._tts_alice:
+            await self._tts_alice.stop()
+        if self._tts_bob:
+            await self._tts_bob.stop()
 
         # Clean up
         self._alice_llm = None
@@ -287,12 +431,16 @@ class PipecatDualBotService:
                 "tts_queue_size": 0,
             }
 
+        tts_queue_size = 0
+        if self._audio_enabled:
+            tts_queue_size = self._tts_queue_alice.qsize() + self._tts_queue_bob.qsize()
+
         return {
             **self.state.to_dict(),
             "turn_count": self.turn_state.turn_count,
             "conversation_history": self.bridge_state.get_history_dicts(),
             "audio_enabled": self._audio_enabled,
-            "tts_queue_size": self._tts_queue.qsize() if self._audio_enabled else 0,
+            "tts_queue_size": tts_queue_size,
         }
 
     def register_viewer(self) -> asyncio.Queue:
@@ -342,14 +490,26 @@ class PipecatDualBotService:
         )
 
         logger.info("Initialized Pipecat GoogleLLMService for Alice and Bob")
-        print(f"[DEBUG] Alice system prompt (first 200 chars): {self._alice_system_prompt[:200]}")
-        print(f"[DEBUG] Bob system prompt (first 200 chars): {self._bob_system_prompt[:200]}")
 
-    def _init_tts(self):
-        """Initialize TTS services for both bots."""
-        self._tts_alice = GeminiTTS(voice_id=GEMINI_VOICES["Alice"])
-        self._tts_bob = GeminiTTS(voice_id=GEMINI_VOICES["Bob"])
-        logger.info(f"Initialized TTS: Alice={GEMINI_VOICES['Alice']}, Bob={GEMINI_VOICES['Bob']}")
+    async def _init_tts(self):
+        """Initialize and start TTS pipelines for both bots."""
+        voices = get_elevenlabs_voices()
+
+        # Create and start Alice's TTS pipeline
+        self._tts_alice = PipecatTTSPipeline(
+            voice_id=voices["Alice"],
+            speaker_name="Alice"
+        )
+        await self._tts_alice.start()
+
+        # Create and start Bob's TTS pipeline
+        self._tts_bob = PipecatTTSPipeline(
+            voice_id=voices["Bob"],
+            speaker_name="Bob"
+        )
+        await self._tts_bob.start()
+
+        logger.info(f"Initialized ElevenLabs TTS pipelines: Alice={voices['Alice']}, Bob={voices['Bob']}")
 
     async def _run_pipecat_conversation(self):
         """
@@ -464,6 +624,19 @@ class PipecatDualBotService:
             if self.state:
                 self.state.is_running = False
 
+    def _strip_speaker_prefix(self, text: str, speaker: str) -> str:
+        """Strip speaker prefix like 'Bob:' or 'Alice:' from start of response."""
+        if not text:
+            return text
+        text = text.strip()
+        # Check for common prefix patterns
+        prefixes = [f"{speaker}:", f"{speaker} :", f"{speaker.lower()}:", f"{speaker.upper()}:"]
+        for prefix in prefixes:
+            if text.lower().startswith(prefix.lower()):
+                text = text[len(prefix):].strip()
+                break
+        return text
+
     async def _run_bot_turn(
         self,
         bot_name: str,
@@ -491,13 +664,11 @@ class PipecatDualBotService:
 
             # Create fresh context with all messages including system prompt
             context = OpenAILLMContext(messages=context_messages)
-
-            print(f"[DEBUG] [{bot_name}] Running LLM with {len(context_messages)} messages (including system)")
-            print(f"[DEBUG] [{bot_name}] System prompt (first 100 chars): {system_prompt[:100] if system_prompt else 'NONE'}")
-
             response = await llm.run_inference(context)
 
             if response:
+                # Strip any speaker prefix from the response (e.g., "Bob: Hello" -> "Hello")
+                response = self._strip_speaker_prefix(response, bot_name)
                 messages.append({"role": "assistant", "content": response})
                 logger.info(f"[{bot_name}] Response: {response[:80]}...")
             else:
@@ -580,34 +751,39 @@ class PipecatDualBotService:
             energy=energy,
             overlap_ms=overlap_ms,
         )
-        await self._tts_queue.put(job)
+        # Route to appropriate queue for parallel processing
+        queue = self._tts_queue_alice if speaker == "Alice" else self._tts_queue_bob
+        await queue.put(job)
         logger.debug(f"Queued TTS job #{job.sequence} for {speaker}")
 
-    async def _tts_worker(self):
-        """Background worker that processes TTS jobs."""
-        logger.info("TTS worker started")
+    async def _tts_worker(
+        self,
+        speaker: str,
+        queue: asyncio.Queue,
+        pipeline: PipecatTTSPipeline
+    ):
+        """Background worker that processes TTS jobs for a specific speaker."""
+        logger.info(f"TTS worker for {speaker} started")
 
         # Continue while running OR while there are jobs in the queue
-        while (self.state and self.state.is_running) or not self._tts_queue.empty():
+        while (self.state and self.state.is_running) or not queue.empty():
             try:
                 # Get next job from queue
                 try:
-                    job = await asyncio.wait_for(self._tts_queue.get(), timeout=1.0)
+                    job = await asyncio.wait_for(queue.get(), timeout=1.0)
                 except asyncio.TimeoutError:
-                    if not (self.state and self.state.is_running) and self._tts_queue.empty():
+                    if not (self.state and self.state.is_running) and queue.empty():
                         break
                     continue
 
-                logger.info(f"Processing TTS job #{job.sequence} for {job.speaker}")
+                logger.debug(f"[{speaker}] Processing TTS job #{job.sequence}")
 
-                # Select TTS service
-                tts = self._tts_alice if job.speaker == "Alice" else self._tts_bob
-                if not tts:
-                    logger.warning(f"TTS service not initialized for {job.speaker}")
+                if not pipeline:
+                    logger.warning(f"[{speaker}] TTS pipeline not initialized")
                     continue
 
                 # Generate audio
-                audio_data = await tts.synthesize(job.text)
+                audio_data = await pipeline.synthesize(job.text)
 
                 if audio_data:
                     # Broadcast audio to viewers
@@ -627,14 +803,14 @@ class PipecatDualBotService:
                     }
 
                     await self.bridge_state.broadcast_to_viewers(audio_message)
-                    logger.info(f"TTS job #{job.sequence} complete: {len(audio_data)} bytes")
+                    logger.info(f"[{speaker}] TTS job #{job.sequence} complete: {len(audio_data)} bytes")
                 else:
-                    logger.warning(f"TTS job #{job.sequence} produced no audio")
+                    logger.warning(f"[{speaker}] TTS job #{job.sequence} produced no audio")
 
             except asyncio.CancelledError:
-                logger.info("TTS worker cancelled")
+                logger.info(f"[{speaker}] TTS worker cancelled")
                 break
             except Exception as e:
-                logger.exception(f"Error in TTS worker: {e}")
+                logger.exception(f"[{speaker}] Error in TTS worker: {e}")
 
-        logger.info("TTS worker stopped")
+        logger.info(f"TTS worker for {speaker} stopped")

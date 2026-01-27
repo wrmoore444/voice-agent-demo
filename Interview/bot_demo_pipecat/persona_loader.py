@@ -141,4 +141,4 @@ def list_personas() -> Dict[str, List[str]]:
 
 def get_default_personas() -> tuple:
     """Get the default persona filenames."""
-    return ("alice_insurance_agent.json", "bob_frustrated_customer.json")
+    return ("alice_insurance_agent.json", "bob_insurance_frustrated_claimant.json")

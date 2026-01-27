@@ -1536,13 +1536,15 @@ async def get_pipecat_personas():
 async def start_pipecat_demo(
     topic: str = Query(default="", description="Conversation topic (optional)"),
     alice: str = Query(default=None, description="Alice persona filename"),
-    bob: str = Query(default=None, description="Bob persona filename")
+    bob: str = Query(default=None, description="Bob persona filename"),
+    enable_audio: bool = Query(default=False, description="Enable TTS audio generation")
 ):
     """Start a Pipecat-based bot-to-bot conversation demo."""
     success = await pipecat_demo_service.start(
         topic=topic,
         alice_persona=alice,
-        bob_persona=bob
+        bob_persona=bob,
+        enable_audio=enable_audio
     )
     if not success:
         raise HTTPException(400, "Pipecat demo already running or failed to start")
@@ -1554,6 +1556,7 @@ async def start_pipecat_demo(
         "alice_persona": state.get("alice_persona"),
         "bob_persona": state.get("bob_persona"),
         "topic": state.get("topic"),
+        "audio_enabled": state.get("audio_enabled"),
         "message": "Pipecat bot conversation started"
     }
 
@@ -1833,6 +1836,23 @@ async def pipecat_demo_viewer_page():
         .empty-state p {
             margin-bottom: 10px;
         }
+        .audio-toggle {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: #27272a;
+            padding: 8px 16px;
+            border-radius: 8px;
+        }
+        .audio-toggle input {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+        .audio-toggle label {
+            cursor: pointer;
+            font-size: 14px;
+        }
     </style>
 </head>
 <body>
@@ -1860,6 +1880,10 @@ async def pipecat_demo_viewer_page():
             <button class="btn-start" onclick="startDemo()">Start</button>
             <button class="btn-stop" onclick="stopDemo()">Stop</button>
             <button class="btn-clear" onclick="clearMessages()">Clear</button>
+            <div class="audio-toggle">
+                <input type="checkbox" id="audioEnabled">
+                <label for="audioEnabled">Audio</label>
+            </div>
         </div>
 
         <div id="status" class="status disconnected">
@@ -1876,8 +1900,23 @@ async def pipecat_demo_viewer_page():
 
     <script>
         let ws = null;
+        let audioContext = null;
+        let scheduledEndTime = 0;
+        let pendingAudioCount = 0;
         const conversationDiv = document.getElementById('conversation');
         const statusDiv = document.getElementById('status');
+
+        // Initialize audio context on user interaction
+        function initAudio() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: 24000
+                });
+            }
+            if (audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+        }
 
         // Format persona filename into readable label
         function formatPersonaLabel(filename) {
@@ -1952,10 +1991,114 @@ async def pipecat_demo_viewer_page():
                     }
                 } else if (data.type === 'message') {
                     addMessage(data.data);
+                } else if (data.type === 'audio') {
+                    handleAudio(data.data);
                 } else if (data.type === 'ping') {
                     // Keepalive
                 }
             };
+        }
+
+        function handleAudio(audioData) {
+            const audioEnabled = document.getElementById('audioEnabled').checked;
+            if (!audioEnabled) return;
+
+            try {
+                initAudio();
+                if (!audioContext) {
+                    console.error('AudioContext not available');
+                    return;
+                }
+
+                // Decode base64 audio
+                const binaryString = atob(audioData.audio);
+                if (binaryString.length === 0) {
+                    console.warn('Empty audio data received');
+                    return;
+                }
+
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+
+                // Add variance to overlap for natural feel (+/- 100ms)
+                const variance = (Math.random() - 0.5) * 200;
+                const overlapMs = (audioData.overlap_ms || 0) + variance;
+
+                console.log(`Received audio #${audioData.sequence}: ${audioData.speaker} (${audioData.energy}, overlap: ${Math.round(overlapMs)}ms)`);
+
+                scheduleAudio({
+                    data: bytes,
+                    speaker: audioData.speaker,
+                    sampleRate: audioData.sample_rate || 24000,
+                    pace: audioData.pace || 0.5,
+                    energy: audioData.energy || 'normal',
+                    overlapMs: overlapMs
+                });
+            } catch (error) {
+                console.error('Error handling audio:', error);
+            }
+        }
+
+        function scheduleAudio(audio) {
+            pendingAudioCount++;
+
+            try {
+                // Ensure buffer is valid for Int16Array
+                if (audio.data.buffer.byteLength % 2 !== 0) {
+                    console.warn('Audio data not aligned for Int16Array, skipping');
+                    pendingAudioCount--;
+                    return;
+                }
+
+                // Convert PCM to AudioBuffer
+                const pcmData = new Int16Array(audio.data.buffer);
+                if (pcmData.length === 0) {
+                    console.warn('Empty PCM data');
+                    pendingAudioCount--;
+                    return;
+                }
+
+                const audioBuffer = audioContext.createBuffer(1, pcmData.length, audio.sampleRate);
+                const channelData = audioBuffer.getChannelData(0);
+
+                // Convert Int16 to Float32
+                for (let i = 0; i < pcmData.length; i++) {
+                    channelData[i] = pcmData[i] / 32768.0;
+                }
+
+                // Create buffer source
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+
+                // Calculate when to start (with overlap)
+                const now = audioContext.currentTime;
+                const audioDuration = audioBuffer.duration;
+
+                let startTime;
+                if (scheduledEndTime > now) {
+                    // Previous audio still scheduled - apply overlap
+                    startTime = Math.max(now, scheduledEndTime + (audio.overlapMs / 1000));
+                } else {
+                    // No pending audio, start immediately
+                    startTime = now;
+                }
+
+                source.start(startTime);
+                scheduledEndTime = startTime + audioDuration;
+
+                console.log(`Scheduled audio for ${audio.speaker}: start=${startTime.toFixed(2)}s, duration=${audioDuration.toFixed(2)}s`);
+
+                source.onended = () => {
+                    pendingAudioCount--;
+                };
+
+            } catch (error) {
+                console.error('Error scheduling audio:', error);
+                pendingAudioCount--;
+            }
         }
 
         function addMessage(msg) {
@@ -1990,12 +2133,19 @@ async def pipecat_demo_viewer_page():
             const topic = document.getElementById('topic').value;
             const alice = document.getElementById('alicePersona').value;
             const bob = document.getElementById('bobPersona').value;
+            const enableAudio = document.getElementById('audioEnabled').checked;
+
+            // Initialize audio context if audio is enabled (requires user interaction)
+            if (enableAudio) {
+                initAudio();
+            }
 
             // Build query string
             const params = new URLSearchParams();
             if (topic) params.append('topic', topic);
             if (alice) params.append('alice', alice);
             if (bob) params.append('bob', bob);
+            params.append('enable_audio', enableAudio);
 
             try {
                 const response = await fetch(`/pipecat-demo/start?${params.toString()}`, {
@@ -2005,7 +2155,8 @@ async def pipecat_demo_viewer_page():
                 if (response.ok) {
                     const aliceLabel = formatPersonaLabel(alice);
                     const bobLabel = formatPersonaLabel(bob);
-                    statusDiv.innerHTML = `Started - ${aliceLabel} vs ${bobLabel}`;
+                    const audioStatus = enableAudio ? ' (with audio)' : '';
+                    statusDiv.innerHTML = `Started - ${aliceLabel} vs ${bobLabel}${audioStatus}`;
                 } else {
                     alert(data.detail || 'Failed to start Pipecat demo');
                 }

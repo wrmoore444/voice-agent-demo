@@ -1,4 +1,5 @@
-pipecat-ai[silero,websocket,google,local-smart-turn-v3]==0.0.92
+pipecat-ai[silero,websocket,google,local-smart-turn-v3,webrtc]==0.0.92
+aiortc
 fastapi
 uvicorn
 elevenlabs

@@ -20,13 +20,19 @@ cd voice-agent-demo/Interview
 
 ### 2. Create Virtual Environment
 
+**Important:** Requires Python 3.10-3.13 (Python 3.14 is NOT supported)
+
 ```bash
-# Windows
+# Windows (if you have multiple Python versions)
+py -3.12 -m venv venv
+venv\Scripts\activate
+
+# Windows (if Python 3.12/3.13 is your default)
 python -m venv venv
 venv\Scripts\activate
 
 # macOS/Linux
-python3 -m venv venv
+python3.12 -m venv venv
 source venv/bin/activate
 ```
 
@@ -130,7 +136,7 @@ voice-agent-demo/
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.10, 3.11, 3.12, or 3.13 (NOT 3.14+)
 - API Keys:
   - [Google AI Studio](https://aistudio.google.com/) - Gemini API key
   - [ElevenLabs](https://elevenlabs.io/) - For audio (optional)

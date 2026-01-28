@@ -1520,26 +1520,90 @@ async def demo_viewer_page():
     )
 
 
-# ========== PIPECAT BOT-TO-BOT DEMO ==========
+# =============================================================================
+# PIPECAT BOT-TO-BOT DEMO API
+# =============================================================================
+#
+# This section provides REST API endpoints and WebSocket connections for the
+# Pipecat-based bot-to-bot conversation demo.
+#
+# ENDPOINTS OVERVIEW:
+# -------------------
+# GET  /pipecat-demo/personas     - List available persona files
+# POST /pipecat-demo/start        - Start a new conversation
+# POST /pipecat-demo/stop         - Stop the current conversation
+# GET  /pipecat-demo/status       - Get conversation state
+# WS   /pipecat-demo/viewer/ws    - WebSocket for real-time updates
+# GET  /pipecat-demo/viewer       - HTML viewer page
+#
+# TYPICAL FLOW:
+# -------------
+# 1. Browser opens /pipecat-demo/viewer (HTML page)
+# 2. Page fetches /pipecat-demo/personas to populate dropdowns
+# 3. Page connects to /pipecat-demo/viewer/ws WebSocket
+# 4. User clicks Start -> POST /pipecat-demo/start
+# 5. WebSocket receives messages and audio in real-time
+# 6. User clicks Stop -> POST /pipecat-demo/stop (or conversation ends naturally)
+#
+# IMPLEMENTATION:
+# ---------------
+# All business logic is in PipecatDualBotService (dual_bot_service.py).
+# These endpoints are thin wrappers that delegate to the service.
+#
+# =============================================================================
 
-# Global Pipecat demo service instance
-pipecat_demo_service = PipecatDualBotService(max_turns=100, turn_delay_ms=300)  # High limit - conversation should end naturally
+# Global service instance - handles one conversation at a time
+# max_turns=100 is a safety limit; conversations should end naturally via farewell detection
+pipecat_demo_service = PipecatDualBotService(max_turns=100, turn_delay_ms=300)
 
 
+# -----------------------------------------------------------------------------
+# GET /pipecat-demo/personas - List available persona files
+# -----------------------------------------------------------------------------
 @app.get("/pipecat-demo/personas")
 async def get_pipecat_personas():
-    """Get list of available personas for Pipecat demo."""
+    """
+    Get list of available personas for the Pipecat demo.
+
+    Returns JSON with alice and bob persona lists:
+    {
+        "alice": ["alice_bank_teller", "alice_insurance_agent", ...],
+        "bob": ["bob_bank_upset_customer", "bob_insurance_frustrated_claimant", ...]
+    }
+
+    Used by the viewer page to populate the persona dropdown selectors.
+    """
     return pipecat_list_personas()
 
 
+# -----------------------------------------------------------------------------
+# POST /pipecat-demo/start - Start a new conversation
+# -----------------------------------------------------------------------------
 @app.post("/pipecat-demo/start")
 async def start_pipecat_demo(
     topic: str = Query(default="", description="Conversation topic (optional)"),
-    alice: str = Query(default=None, description="Alice persona filename"),
-    bob: str = Query(default=None, description="Bob persona filename"),
-    enable_audio: bool = Query(default=False, description="Enable TTS audio generation")
+    alice: str = Query(default=None, description="Alice persona filename (e.g., 'alice_bank_teller.json')"),
+    bob: str = Query(default=None, description="Bob persona filename (e.g., 'bob_bank_upset_customer.json')"),
+    enable_audio: bool = Query(default=False, description="Enable ElevenLabs TTS audio generation")
 ):
-    """Start a Pipecat-based bot-to-bot conversation demo."""
+    """
+    Start a Pipecat-based bot-to-bot conversation.
+
+    Query Parameters:
+        topic: Optional topic to seed the conversation
+        alice: Alice persona filename (defaults to alice_insurance_agent.json)
+        bob: Bob persona filename (defaults to bob_insurance_frustrated_claimant.json)
+        enable_audio: If true, generates TTS audio via ElevenLabs (requires API key)
+
+    Returns:
+        JSON with status, selected personas, and audio_enabled flag
+
+    Errors:
+        400: If a conversation is already running or failed to start
+
+    Example:
+        POST /pipecat-demo/start?alice=alice_bank_teller.json&bob=bob_bank_upset_customer.json&enable_audio=true
+    """
     success = await pipecat_demo_service.start(
         topic=topic,
         alice_persona=alice,
@@ -1561,9 +1625,25 @@ async def start_pipecat_demo(
     }
 
 
+# -----------------------------------------------------------------------------
+# POST /pipecat-demo/stop - Stop the current conversation
+# -----------------------------------------------------------------------------
 @app.post("/pipecat-demo/stop")
 async def stop_pipecat_demo():
-    """Stop the Pipecat bot-to-bot conversation demo."""
+    """
+    Stop the current Pipecat bot-to-bot conversation.
+
+    This triggers a graceful shutdown:
+    1. Stops the conversation orchestrator
+    2. Waits for TTS workers to finish processing queued audio
+    3. Cleans up resources
+
+    Returns:
+        JSON with status: "stopped"
+
+    Errors:
+        400: If no conversation is currently running
+    """
     success = await pipecat_demo_service.stop()
     if not success:
         raise HTTPException(400, "No Pipecat demo running")
@@ -1573,35 +1653,91 @@ async def stop_pipecat_demo():
     }
 
 
+# -----------------------------------------------------------------------------
+# GET /pipecat-demo/status - Get current conversation state
+# -----------------------------------------------------------------------------
 @app.get("/pipecat-demo/status")
 async def get_pipecat_demo_status():
-    """Get current Pipecat demo status."""
+    """
+    Get the current state of the Pipecat demo.
+
+    Returns JSON with:
+        is_running: bool - Whether a conversation is active
+        turn_count: int - Number of turns completed
+        conversation_history: list - All messages in the conversation
+        audio_enabled: bool - Whether TTS is active
+        tts_queue_size: int - Number of pending TTS jobs
+        alice_persona: str - Current Alice persona filename
+        bob_persona: str - Current Bob persona filename
+        topic: str - Conversation topic (if set)
+
+    Useful for polling status or debugging.
+    """
     state = pipecat_demo_service.get_state()
     state["implementation"] = "pipecat"
     return state
 
 
+# -----------------------------------------------------------------------------
+# WebSocket /pipecat-demo/viewer/ws - Real-time conversation updates
+# -----------------------------------------------------------------------------
 @app.websocket("/pipecat-demo/viewer/ws")
 async def pipecat_demo_viewer_websocket(websocket: WebSocket):
-    """WebSocket endpoint for viewing the Pipecat bot-to-bot conversation."""
+    """
+    WebSocket endpoint for viewing the Pipecat bot-to-bot conversation in real-time.
+
+    CONNECTION FLOW:
+    ----------------
+    1. Client connects, server accepts
+    2. Server immediately sends conversation history (type: "history")
+    3. Server streams messages as they occur (type: "message", "audio", "ping")
+    4. On disconnect, client is unregistered
+
+    MESSAGE TYPES SENT TO CLIENT:
+    -----------------------------
+    - {"type": "history", "data": [...]} - Full conversation history on connect
+    - {"type": "message", "data": {...}} - New text message from Alice or Bob
+    - {"type": "audio", "data": {...}}   - Base64-encoded audio data for playback
+    - {"type": "ping"}                   - Keepalive (every 30 seconds of inactivity)
+
+    AUDIO DATA FORMAT:
+    ------------------
+    {
+        "type": "audio",
+        "data": {
+            "speaker": "Alice" | "Bob",
+            "audio": "<base64-encoded PCM>",
+            "format": "pcm",
+            "sample_rate": 24000,
+            "sequence": 1,           // For ordering playback
+            "pace": 0.5,             // Speech pace indicator
+            "energy": "normal",      // Energy level
+            "overlap_ms": 200        // Suggested overlap with previous
+        }
+    }
+    """
     await websocket.accept()
+
+    # Register this viewer to receive broadcasts
     viewer_queue = pipecat_demo_service.register_viewer()
 
     try:
-        # Send current conversation history on connect
+        # Send current conversation history immediately on connect
+        # This allows late-joining viewers to see what's already happened
         state = pipecat_demo_service.get_state()
         await websocket.send_json({
             "type": "history",
             "data": state.get("conversation_history", [])
         })
 
-        # Stream new messages
+        # Main loop: stream new messages to this viewer
         while True:
             try:
+                # Wait for next message from the service (with timeout for keepalive)
                 message = await asyncio.wait_for(viewer_queue.get(), timeout=30.0)
                 await websocket.send_json(message)
             except asyncio.TimeoutError:
-                # Send keepalive
+                # No messages for 30 seconds - send keepalive to prevent disconnect
                 await websocket.send_json({"type": "ping"})
             except Exception as e:
                 logger.error(f"Error sending to Pipecat viewer: {e}")
@@ -1609,6 +1745,7 @@ async def pipecat_demo_viewer_websocket(websocket: WebSocket):
     except Exception as e:
         logger.error(f"Pipecat viewer WebSocket error: {e}")
     finally:
+        # Clean up: unregister viewer and close connection
         pipecat_demo_service.unregister_viewer(viewer_queue)
         try:
             await websocket.close()
@@ -1616,6 +1753,18 @@ async def pipecat_demo_viewer_websocket(websocket: WebSocket):
             pass
 
 
+# -----------------------------------------------------------------------------
+# GET /pipecat-demo/viewer - HTML Viewer Page
+# -----------------------------------------------------------------------------
+# The viewer page is embedded below as an HTML string. It provides:
+# - Persona selection dropdowns (Alice and Bob)
+# - Start/Stop/Clear buttons
+# - Real-time conversation display
+# - Audio playback using Web Audio API
+# - Visual indicators for who is speaking
+#
+# For details on the viewer implementation, see API_REFERENCE.md
+# -----------------------------------------------------------------------------
 @app.get("/pipecat-demo/viewer")
 async def pipecat_demo_viewer_page():
     """Serve the Pipecat demo viewer HTML page with no-cache headers."""

@@ -87,7 +87,7 @@ class BotPipelineFactory:
         vad_params = VADParams(
             min_volume=0.4,           # Slightly higher threshold to ignore background noise
             start_secs=0.1,           # Start detecting speech quickly
-            stop_secs=0.2,            # Shorter silence before considering speech ended
+            stop_secs=0.1,            # Shorter silence before considering speech ended
             confidence=0.7,           # Balance between responsiveness and accuracy
         )
         transport = DailyTransport(

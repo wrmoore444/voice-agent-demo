@@ -4,13 +4,13 @@ BOT PIPELINE FACTORY - Creates Pipecat Pipelines for Daily Bot Conversations
 =============================================================================
 
 This module creates full Pipecat pipelines for each bot (Alice and Bob).
-Each pipeline uses DailyTransport for WebRTC audio, GoogleLLMService for
-text-based LLM, and ElevenLabsTTSService for speech synthesis.
+Each pipeline uses DailyTransport for WebRTC audio, Deepgram for STT,
+GoogleLLMService for text LLM, and ElevenLabsTTSService for TTS.
 
-PIPELINE STRUCTURE (Text-based approach for lower latency):
------------------------------------------------------------
-    DailyTransport.input() → STT (Daily/Deepgram) → LLM (Gemini text) →
-    TTS (ElevenLabs) → DailyTransport.output()
+PIPELINE STRUCTURE:
+-------------------
+    DailyTransport.input() → Deepgram STT → context_aggregator →
+    LLM (Gemini) → TTS (ElevenLabs) → DailyTransport.output()
 
 VOICE CONFIGURATION:
 --------------------
@@ -28,13 +28,14 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineTask, PipelineParams
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
-from pipecat.transports.daily.transport import DailyParams, DailyTransport, DailyTranscriptionSettings
+from pipecat.transports.daily.transport import DailyParams, DailyTransport
 from pipecat.transcriptions.language import Language
-from pipecat.frames.frames import LLMMessagesFrame, TextFrame, LLMRunFrame
+from pipecat.frames.frames import LLMRunFrame
 from pipecat.processors.transcript_processor import TranscriptProcessor
 
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+from pipecat.services.deepgram.stt import DeepgramSTTService
 
 
 # ElevenLabs voice IDs for each bot
@@ -47,7 +48,7 @@ ELEVENLABS_VOICES = {
 class BotPipelineFactory:
     """
     Factory for creating Pipecat pipelines for Daily bot conversations.
-    Uses text-based LLM + TTS for lower latency than native audio models.
+    Uses Deepgram STT + text LLM + ElevenLabs TTS for low latency.
     """
 
     def __init__(self):
@@ -60,6 +61,10 @@ class BotPipelineFactory:
         if not self.elevenlabs_api_key:
             raise ValueError("ELEVENLABS_API_KEY environment variable not set")
 
+        self.deepgram_api_key = os.getenv("DEEPGRAM_API_KEY")
+        if not self.deepgram_api_key:
+            raise ValueError("DEEPGRAM_API_KEY environment variable not set")
+
     def create_pipeline(
         self,
         bot_name: str,
@@ -69,7 +74,7 @@ class BotPipelineFactory:
         broadcast_callback: Optional[Callable[[dict], Awaitable[None]]] = None,
     ) -> tuple[DailyTransport, PipelineTask, TranscriptProcessor]:
         """
-        Create a complete pipeline for a bot using text LLM + TTS.
+        Create a complete pipeline for a bot.
 
         Args:
             bot_name: "Alice" or "Bob"
@@ -83,14 +88,15 @@ class BotPipelineFactory:
         """
         voice_id = ELEVENLABS_VOICES.get(bot_name, ELEVENLABS_VOICES["Alice"])
 
-        # Create Daily transport with transcription enabled (uses Deepgram)
+        # VAD settings for detecting speech
         vad_params = VADParams(
             min_volume=0.4,
             start_secs=0.1,
-            stop_secs=0.3,   # Slightly longer to avoid cutting off mid-sentence
+            stop_secs=0.3,
             confidence=0.7,
         )
 
+        # Create Daily transport (no built-in transcription - using Deepgram in pipeline)
         transport = DailyTransport(
             room_url,
             token,
@@ -98,30 +104,30 @@ class BotPipelineFactory:
             DailyParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
+                audio_in_sample_rate=16000,   # Deepgram expects 16kHz
                 audio_out_sample_rate=24000,  # ElevenLabs outputs 24kHz
                 vad_enabled=True,
                 vad_analyzer=SileroVADAnalyzer(params=vad_params),
-                transcription_enabled=True,  # Enable Deepgram STT
-                transcription_settings=DailyTranscriptionSettings(
-                    language="en",
-                    tier="nova",
-                    model="nova-2-conversationalai",
-                ),
+                transcription_enabled=False,  # Using Deepgram STT in pipeline instead
             ),
         )
 
-        # Add transport event handlers for debugging
-        @transport.event_handler("on_transcription_message")
-        async def on_transcription(transport, message):
-            print(f"[TRANSCRIPTION] [{bot_name}] Received: {message}")
-
+        # Debug: log when participants join
         @transport.event_handler("on_participant_joined")
         async def on_participant_joined(transport, participant):
             print(f"[DAILY] [{bot_name}] Participant joined: {participant.get('info', {}).get('userName', 'unknown')}")
 
-        @transport.event_handler("on_first_participant_joined")
-        async def on_first_participant(transport, participant):
-            print(f"[DAILY] [{bot_name}] First participant joined")
+        # Create Deepgram STT service
+        stt = DeepgramSTTService(
+            api_key=self.deepgram_api_key,
+            live_options={
+                "model": "nova-2",
+                "language": "en-US",
+                "smart_format": True,
+                "punctuate": True,
+                "interim_results": False,  # Only final results for cleaner turn-taking
+            },
+        )
 
         # Create text-based Gemini LLM
         llm = GoogleLLMService(
@@ -129,7 +135,7 @@ class BotPipelineFactory:
             model="gemini-2.0-flash",
             params=GoogleLLMService.InputParams(
                 temperature=0.8,
-                max_tokens=150,  # Keep responses short
+                max_tokens=150,
             ),
         )
 
@@ -140,7 +146,7 @@ class BotPipelineFactory:
             params=ElevenLabsTTSService.InputParams(
                 stability=0.5,
                 similarity_boost=0.75,
-                optimize_streaming_latency=4,  # Max optimization for speed
+                optimize_streaming_latency=4,
             ),
         )
 
@@ -180,13 +186,14 @@ class BotPipelineFactory:
         context = OpenAILLMContext(messages)
         context_aggregator = llm.create_context_aggregator(context)
 
-        # Build pipeline: input -> STT -> LLM -> TTS -> output
+        # Build pipeline: input → STT → aggregator → LLM → TTS → output
         pipeline = Pipeline([
             transport.input(),
-            context_aggregator.user(),
+            stt,                          # Deepgram STT converts audio to text
+            context_aggregator.user(),    # Aggregates user text into context
             transcript.user(),
-            llm,
-            tts,
+            llm,                          # Generates response
+            tts,                          # Converts response to audio
             transcript.assistant(),
             transport.output(),
             context_aggregator.assistant(),
@@ -201,7 +208,7 @@ class BotPipelineFactory:
             ),
         )
 
-        print(f"[FACTORY] Created text+TTS pipeline for {bot_name} with voice {voice_id}")
+        print(f"[FACTORY] Created STT+LLM+TTS pipeline for {bot_name}")
 
         return transport, task, transcript
 

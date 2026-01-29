@@ -3401,7 +3401,7 @@ async def daily_demo_viewer_page():
         </div>
 
         <div id="roomInfo" class="room-info">
-            Daily Room Active
+            Join room (muted): <a id="roomUrl" href="#" target="_blank"></a>
         </div>
 
         <div id="conversation" class="conversation">
@@ -3534,6 +3534,9 @@ async def daily_demo_viewer_page():
                     statusDiv.innerHTML = `Started - ${aliceLabel} vs ${bobLabel}`;
 
                     if (data.room_url) {
+                        const roomUrlLink = document.getElementById('roomUrl');
+                        roomUrlLink.href = data.room_url;
+                        roomUrlLink.textContent = data.room_url;
                         roomInfoDiv.classList.add('visible');
                     }
                 } else {

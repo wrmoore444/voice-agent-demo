@@ -4,19 +4,20 @@ BOT PIPELINE FACTORY - Creates Pipecat Pipelines for Daily Bot Conversations
 =============================================================================
 
 This module creates full Pipecat pipelines for each bot (Alice and Bob).
-Each pipeline uses DailyTransport for WebRTC audio, Deepgram for STT,
-GoogleLLMService for text LLM, and ElevenLabsTTSService for TTS.
+Each pipeline uses DailyTransport for WebRTC audio and GeminiLiveLLMService
+for native audio LLM processing.
 
 PIPELINE STRUCTURE:
 -------------------
-    DailyTransport.input() → Deepgram STT → context_aggregator →
-    LLM (Gemini) → TTS (ElevenLabs) → DailyTransport.output()
+    DailyTransport.input() → context_aggregator.user() → transcript.user() →
+    GeminiLiveLLMService → transcript.assistant() → DailyTransport.output() →
+    context_aggregator.assistant()
 
-VOICE CONFIGURATION:
---------------------
-Different ElevenLabs voices for Alice vs Bob:
-- Alice: Rachel (21m00Tcm4TlvDq8ikWAM) - female, professional
-- Bob: Antoni (ErXwobaYiN019PkySvjV) - male, casual
+GEMINI VOICE CONFIGURATION:
+---------------------------
+Different Gemini voices for Alice vs Bob:
+- Alice: "Aoede" (female, professional)
+- Bob: "Charon" (male, casual)
 """
 
 import os
@@ -30,40 +31,33 @@ from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
 from pipecat.transcriptions.language import Language
-from pipecat.frames.frames import LLMRunFrame
+from pipecat.frames.frames import LLMRunFrame, TranscriptionMessage
 from pipecat.processors.transcript_processor import TranscriptProcessor
 
-from pipecat.services.google.llm import GoogleLLMService
-from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
-from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.google.gemini_live.llm import (
+    GeminiLiveLLMService,
+    InputParams as GeminiInputParams,
+    GeminiModalities,
+)
 
 
-# ElevenLabs voice IDs for each bot
-ELEVENLABS_VOICES = {
-    "Alice": os.getenv("ELEVENLABS_VOICE_ID_ALICE", "21m00Tcm4TlvDq8ikWAM"),  # Rachel
-    "Bob": os.getenv("ELEVENLABS_VOICE_ID_BOB", "ErXwobaYiN019PkySvjV"),      # Antoni
+# Gemini voice IDs for each bot
+GEMINI_VOICES = {
+    "Alice": "Aoede",   # Female, professional tone
+    "Bob": "Charon",    # Male, casual tone
 }
 
 
 class BotPipelineFactory:
     """
     Factory for creating Pipecat pipelines for Daily bot conversations.
-    Uses Deepgram STT + text LLM + ElevenLabs TTS for low latency.
     """
 
     def __init__(self):
         """Initialize the factory."""
-        self.gemini_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not self.gemini_api_key:
+        self.api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not self.api_key:
             raise ValueError("GEMINI_API_KEY or GOOGLE_API_KEY environment variable not set")
-
-        self.elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY")
-        if not self.elevenlabs_api_key:
-            raise ValueError("ELEVENLABS_API_KEY environment variable not set")
-
-        self.deepgram_api_key = os.getenv("DEEPGRAM_API_KEY")
-        if not self.deepgram_api_key:
-            raise ValueError("DEEPGRAM_API_KEY environment variable not set")
 
     def create_pipeline(
         self,
@@ -86,17 +80,15 @@ class BotPipelineFactory:
         Returns:
             Tuple of (DailyTransport, PipelineTask, TranscriptProcessor)
         """
-        voice_id = ELEVENLABS_VOICES.get(bot_name, ELEVENLABS_VOICES["Alice"])
+        voice_id = GEMINI_VOICES.get(bot_name, "Aoede")
 
-        # VAD settings for detecting speech
+        # Create Daily transport with VAD
         vad_params = VADParams(
             min_volume=0.4,
             start_secs=0.1,
-            stop_secs=0.3,
+            stop_secs=0.1,
             confidence=0.7,
         )
-
-        # Create Daily transport (no built-in transcription - using Deepgram in pipeline)
         transport = DailyTransport(
             room_url,
             token,
@@ -104,61 +96,67 @@ class BotPipelineFactory:
             DailyParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
-                audio_in_sample_rate=16000,   # Deepgram expects 16kHz
-                audio_out_sample_rate=24000,  # ElevenLabs outputs 24kHz
+                audio_in_sample_rate=16000,
+                audio_out_sample_rate=24000,
                 vad_enabled=True,
                 vad_analyzer=SileroVADAnalyzer(params=vad_params),
-                transcription_enabled=False,  # Using Deepgram STT in pipeline instead
+                transcription_enabled=False,
             ),
         )
 
-        # Debug: log when participants join
-        @transport.event_handler("on_participant_joined")
-        async def on_participant_joined(transport, participant):
-            print(f"[DAILY] [{bot_name}] Participant joined: {participant.get('info', {}).get('userName', 'unknown')}")
-
-        # Create Deepgram STT service
-        stt = DeepgramSTTService(
-            api_key=self.deepgram_api_key,
-            live_options={
-                "model": "nova-2",
-                "language": "en-US",
-                "smart_format": True,
-                "punctuate": True,
-                "interim_results": False,  # Only final results for cleaner turn-taking
-            },
-        )
-
-        # Create text-based Gemini LLM
-        llm = GoogleLLMService(
-            api_key=self.gemini_api_key,
-            model="gemini-2.0-flash",
-            params=GoogleLLMService.InputParams(
-                temperature=0.8,
-                max_tokens=150,
-            ),
-        )
-
-        # Create ElevenLabs TTS
-        tts = ElevenLabsTTSService(
-            api_key=self.elevenlabs_api_key,
+        # Create Gemini Live LLM service (native audio)
+        llm = GeminiLiveLLMService(
+            api_key=self.api_key,
+            model="models/gemini-2.5-flash-native-audio-preview-09-2025",
             voice_id=voice_id,
-            params=ElevenLabsTTSService.InputParams(
-                stability=0.5,
-                similarity_boost=0.75,
-                optimize_streaming_latency=4,
+            system_instruction=system_prompt,
+            transcribe_model_audio=True,
+            transcribe_user_audio=False,
+            params=GeminiInputParams(
+                temperature=0.8,
+                modalities=GeminiModalities.AUDIO,
+                language=Language.EN_US,
             ),
         )
 
-        # Create transcript processor for viewer updates
+        # Add LLM event handlers
+        @llm.event_handler("on_connection_established")
+        async def on_llm_connected(service):
+            print(f"[LLM] [{bot_name}] ✓ Gemini Live connection ESTABLISHED")
+
+        @llm.event_handler("on_connection_lost")
+        async def on_llm_disconnected(service):
+            print(f"[LLM] [{bot_name}] ✗ Gemini Live connection LOST")
+
+        @llm.event_handler("on_error")
+        async def on_llm_error(service, error):
+            print(f"[LLM] [{bot_name}] ✗ ERROR: {error}")
+
+        # Create transcript processor
         transcript = TranscriptProcessor()
+
+        # Buffer for accumulating transcriptions until sentence completion
+        transcript_buffer = {"speaker": None, "text": ""}
+
+        async def flush_buffer():
+            """Send buffered text to viewers."""
+            if transcript_buffer["text"].strip() and broadcast_callback:
+                print(f"[TRANSCRIPT] {transcript_buffer['speaker']}: {transcript_buffer['text'].strip()}")
+                await broadcast_callback({
+                    "type": "message",
+                    "data": {
+                        "speaker": transcript_buffer["speaker"],
+                        "text": transcript_buffer["text"].strip(),
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                })
+                transcript_buffer["text"] = ""
 
         # Set up transcript event handler to broadcast to viewers
         if broadcast_callback:
             @transcript.event_handler("on_transcript_update")
             async def on_transcript_update(processor, frame):
-                """Broadcast transcriptions to WebSocket viewers."""
-                from pipecat.frames.frames import TranscriptionMessage
+                """Broadcast transcriptions to WebSocket viewers, buffering until sentence end."""
                 for msg in frame.messages:
                     if isinstance(msg, TranscriptionMessage):
                         # Only broadcast assistant (this bot's) transcriptions
@@ -166,34 +164,42 @@ class BotPipelineFactory:
                             continue
 
                         speaker = bot_name
-                        text = msg.content.strip()
+
+                        # If speaker changed, flush the buffer first
+                        if transcript_buffer["speaker"] and transcript_buffer["speaker"] != speaker:
+                            await flush_buffer()
+
+                        transcript_buffer["speaker"] = speaker
+                        transcript_buffer["text"] += msg.content
+
+                        # Check for sentence-ending punctuation or sufficient length
+                        text = transcript_buffer["text"].strip()
+                        should_flush = False
                         if text:
-                            print(f"[TRANSCRIPT] {speaker}: {text}")
-                            await broadcast_callback({
-                                "type": "message",
-                                "data": {
-                                    "speaker": speaker,
-                                    "text": text,
-                                    "timestamp": datetime.utcnow().isoformat(),
-                                }
-                            })
+                            if text[-1] in ".?!":
+                                should_flush = True
+                            elif len(text) > 150:
+                                should_flush = True
+
+                        if should_flush:
+                            await flush_buffer()
 
         # Create context for LLM
         messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": "Please begin the conversation according to your persona."}
+            {
+                "role": "user",
+                "content": "Please begin the conversation according to your persona."
+            }
         ]
         context = OpenAILLMContext(messages)
         context_aggregator = llm.create_context_aggregator(context)
 
-        # Build pipeline: input → STT → aggregator → LLM → TTS → output
+        # Build pipeline
         pipeline = Pipeline([
             transport.input(),
-            stt,                          # Deepgram STT converts audio to text
-            context_aggregator.user(),    # Aggregates user text into context
+            context_aggregator.user(),
             transcript.user(),
-            llm,                          # Generates response
-            tts,                          # Converts response to audio
+            llm,
             transcript.assistant(),
             transport.output(),
             context_aggregator.assistant(),
@@ -208,7 +214,7 @@ class BotPipelineFactory:
             ),
         )
 
-        print(f"[FACTORY] Created STT+LLM+TTS pipeline for {bot_name}")
+        print(f"[FACTORY] Created pipeline for {bot_name} with voice {voice_id}")
 
         return transport, task, transcript
 

@@ -28,7 +28,7 @@ from loguru import logger
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineTask, PipelineParams
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
 from pipecat.transcriptions.language import Language
 from pipecat.frames.frames import LLMRunFrame, TranscriptionMessage
@@ -83,6 +83,13 @@ class BotPipelineFactory:
         voice_id = GEMINI_VOICES.get(bot_name, "Aoede")
 
         # Create Daily transport (positional args: room_url, token, bot_name, params)
+        # Use faster VAD settings for snappier turn-taking
+        vad_params = VADParams(
+            min_volume=0.4,           # Slightly higher threshold to ignore background noise
+            start_secs=0.1,           # Start detecting speech quickly
+            stop_secs=0.4,            # Shorter silence before considering speech ended
+            confidence=0.7,           # Balance between responsiveness and accuracy
+        )
         transport = DailyTransport(
             room_url,
             token,
@@ -90,7 +97,7 @@ class BotPipelineFactory:
             DailyParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(),
+                vad_analyzer=SileroVADAnalyzer(params=vad_params),
                 transcription_enabled=False,  # Using Gemini's built-in transcription
             ),
         )

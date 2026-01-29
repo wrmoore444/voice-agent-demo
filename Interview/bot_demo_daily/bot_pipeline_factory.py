@@ -97,6 +97,9 @@ class BotPipelineFactory:
             DailyParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
+                audio_in_sample_rate=16000,   # Match common speech rate
+                audio_out_sample_rate=24000,  # Gemini outputs 24kHz
+                vad_enabled=True,
                 vad_analyzer=SileroVADAnalyzer(params=vad_params),
                 transcription_enabled=False,  # Using Gemini's built-in transcription
             ),
@@ -196,15 +199,12 @@ class BotPipelineFactory:
         context = OpenAILLMContext(messages)
         context_aggregator = llm.create_context_aggregator(context)
 
-        # Build pipeline
+        # Build pipeline - simplified for Gemini Live which manages context internally
         pipeline = Pipeline([
             transport.input(),
-            context_aggregator.user(),
-            transcript.user(),
             llm,
             transcript.assistant(),
             transport.output(),
-            context_aggregator.assistant(),
         ])
 
         # Create pipeline task

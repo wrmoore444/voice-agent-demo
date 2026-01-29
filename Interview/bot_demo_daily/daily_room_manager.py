@@ -104,7 +104,7 @@ class DailyRoomManager:
             "properties": {
                 "room_name": room_name,
                 "user_name": participant_name,
-                "is_owner": False,
+                "is_owner": True,  # Needed for transcription
                 "enable_recording": False,
                 "start_video_off": True,
                 "start_audio_off": False,

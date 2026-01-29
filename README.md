@@ -81,6 +81,36 @@ Open your browser to: **http://localhost:8000/pipecat-demo/viewer**
 4. **Watch**: Messages appear in real-time with optional audio playback
 5. **Click Stop**: End the conversation at any time
 
+## Making Code Changes with Claude Code
+
+If you want to modify the code during the demo, you can use Claude Code (AI-powered coding assistant).
+
+### Option 1: Claude Code CLI
+
+Check if it's installed:
+```bash
+claude
+```
+
+If not installed but Node.js is available:
+```bash
+npm install -g @anthropic-ai/claude-code
+claude login
+```
+
+Then run from the project folder:
+```bash
+cd voice-agent-demo
+claude
+```
+
+### Option 2: Claude Web Interface
+
+If Claude Code isn't available, use [claude.ai](https://claude.ai) in your browser:
+1. Open claude.ai and sign in
+2. Describe the change you want
+3. Copy/paste the code into your editor
+
 ## Available Personas
 
 ### Alice (Agent)

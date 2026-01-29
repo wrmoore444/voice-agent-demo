@@ -150,12 +150,13 @@ class BotPipelineFactory:
                 """Broadcast transcriptions to WebSocket viewers, buffering until sentence end."""
                 for msg in frame.messages:
                     if isinstance(msg, TranscriptionMessage):
-                        if msg.role == "assistant":
-                            speaker = bot_name
-                        else:
-                            speaker = "Bob" if bot_name == "Alice" else "Alice"
+                        # Only broadcast assistant (this bot's) transcriptions
+                        # Skip user transcriptions to avoid duplicates (other bot sends those)
+                        if msg.role != "assistant":
+                            continue
 
-                        print(f"[DEBUG] [{bot_name}] Raw transcript ({msg.role}): '{msg.content}'")
+                        speaker = bot_name
+                        print(f"[DEBUG] [{bot_name}] Raw transcript: '{msg.content}'")
 
                         # If speaker changed, flush the buffer first
                         if transcript_buffer["speaker"] and transcript_buffer["speaker"] != speaker:

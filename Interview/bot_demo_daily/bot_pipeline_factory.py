@@ -126,11 +126,28 @@ class BotPipelineFactory:
         # Create transcript processor
         transcript = TranscriptProcessor()
 
+        # Buffer for accumulating transcriptions until sentence completion
+        transcript_buffer = {"speaker": None, "text": ""}
+
+        async def flush_buffer():
+            """Send buffered text to viewers."""
+            if transcript_buffer["text"].strip() and broadcast_callback:
+                print(f"[TRANSCRIPT] {transcript_buffer['speaker']}: {transcript_buffer['text'].strip()}")
+                await broadcast_callback({
+                    "type": "message",
+                    "data": {
+                        "speaker": transcript_buffer["speaker"],
+                        "text": transcript_buffer["text"].strip(),
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                })
+                transcript_buffer["text"] = ""
+
         # Set up transcript event handler to broadcast to viewers
         if broadcast_callback:
             @transcript.event_handler("on_transcript_update")
             async def on_transcript_update(processor, frame):
-                """Broadcast transcriptions to WebSocket viewers."""
+                """Broadcast transcriptions to WebSocket viewers, buffering until sentence end."""
                 for msg in frame.messages:
                     if isinstance(msg, TranscriptionMessage):
                         if msg.role == "assistant":
@@ -138,15 +155,17 @@ class BotPipelineFactory:
                         else:
                             speaker = "Bob" if bot_name == "Alice" else "Alice"
 
-                        print(f"[TRANSCRIPT] {speaker}: {msg.content}")
-                        await broadcast_callback({
-                            "type": "message",
-                            "data": {
-                                "speaker": speaker,
-                                "text": msg.content,
-                                "timestamp": datetime.utcnow().isoformat(),
-                            }
-                        })
+                        # If speaker changed, flush the buffer first
+                        if transcript_buffer["speaker"] and transcript_buffer["speaker"] != speaker:
+                            await flush_buffer()
+
+                        transcript_buffer["speaker"] = speaker
+                        transcript_buffer["text"] += msg.content
+
+                        # Check for sentence-ending punctuation
+                        text = transcript_buffer["text"].strip()
+                        if text and text[-1] in ".?!":
+                            await flush_buffer()
 
         # Create context for LLM
         messages = [

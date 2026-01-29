@@ -30,7 +30,7 @@ from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
 from pipecat.transports.daily.transport import DailyParams, DailyTransport, DailyTranscriptionSettings
 from pipecat.transcriptions.language import Language
-from pipecat.frames.frames import LLMMessagesFrame, TextFrame
+from pipecat.frames.frames import LLMMessagesFrame, TextFrame, LLMRunFrame
 from pipecat.processors.transcript_processor import TranscriptProcessor
 
 from pipecat.services.google.llm import GoogleLLMService
@@ -213,5 +213,5 @@ class BotContext:
     async def trigger_opening(self):
         """Trigger the bot to speak their opening line."""
         print(f"[BOT] {self.name} triggering opening...")
-        await self.task.queue_frames([LLMMessagesFrame([])])
-        print(f"[BOT] {self.name} LLMMessagesFrame queued")
+        await self.task.queue_frames([LLMRunFrame()])
+        print(f"[BOT] {self.name} LLMRunFrame queued")

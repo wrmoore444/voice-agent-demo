@@ -15,9 +15,9 @@ ARCHITECTURE OVERVIEW:
    the bots, with Alice typically playing a customer service agent and
    Bob playing a customer.
 
-3. PARALLEL TTS: Audio is generated using ElevenLabs via Pipecat pipelines.
-   Each bot has its own TTS worker running in parallel, allowing both
-   speakers' audio to be generated simultaneously.
+3. SEQUENTIAL TTS: Audio is generated using ElevenLabs via Pipecat pipelines.
+   A single TTS worker processes jobs sequentially to ensure audio is always
+   delivered in the correct conversation order.
 
 4. WEBSOCKET STREAMING: Conversation text and audio are broadcast to
    connected viewers (browser clients) via WebSocket in real-time.
@@ -29,8 +29,8 @@ KEY DESIGN DECISIONS:
   the first one completes. Solution: create a fresh Pipecat pipeline for
   each synthesis request.
 
-- Parallel TTS Workers: To prevent audio from falling behind the conversation,
-  Alice and Bob each have their own TTS queue and worker task.
+- Sequential TTS Processing: A single shared queue ensures audio is always
+  played in correct order. (Parallel workers caused out-of-order delivery.)
 
 - Decoupled Audio: TTS runs asynchronously from the conversation. The LLM
   conversation continues while audio is being generated in the background.
@@ -576,7 +576,7 @@ class PipecatDualBotService:
     2. Create and manage Pipecat LLM services for each bot
     3. Orchestrate turn-taking between the bots
     4. Route messages to connected viewers (WebSocket clients)
-    5. Manage parallel TTS synthesis for both speakers
+    5. Manage sequential TTS synthesis for both speakers
 
     CONVERSATION FLOW:
     ------------------
@@ -585,17 +585,16 @@ class PipecatDualBotService:
     3. Main loop alternates between Bob and Alice
     4. Each turn: format prompt -> LLM inference -> route message -> queue TTS
     5. Conversation ends when farewell phrases are detected or max turns reached
-    6. TTS workers continue until all audio is generated
+    6. TTS worker continues until all audio is generated
 
-    PARALLEL TTS ARCHITECTURE:
-    --------------------------
-    To prevent audio from falling behind, each bot has its own:
-    - TTS queue (asyncio.Queue)
-    - TTS worker task (asyncio.Task)
-    - TTS pipeline (PipecatTTSPipeline)
+    SEQUENTIAL TTS ARCHITECTURE:
+    ----------------------------
+    To ensure audio plays in correct order, we use:
+    - Single shared TTS queue (asyncio.Queue)
+    - Single TTS worker task (asyncio.Task)
+    - Separate TTS pipelines for each speaker (different voices)
 
-    This allows Alice's audio to be generated while Bob's audio is also
-    being generated, roughly doubling throughput.
+    This ensures audio always plays in the correct conversation order.
     """
 
     def __init__(
@@ -1534,6 +1533,9 @@ class PipecatDualBotService:
         pipeline: PipecatTTSPipeline
     ):
         """
+        DEPRECATED: This parallel worker is no longer used.
+        See _tts_worker_shared() for the current sequential implementation.
+
         Background worker that processes TTS jobs for a specific speaker.
 
         Each speaker (Alice, Bob) has their own worker running in parallel.

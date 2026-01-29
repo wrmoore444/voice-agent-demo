@@ -139,6 +139,7 @@ class DailyBotService:
             # Step 5: Create Alice's pipeline
             alice_system_prompt = self._alice_persona.generate_system_prompt()
             alice_system_prompt += "\n\nYou are starting this conversation. Keep responses to 1-2 short sentences."
+            alice_system_prompt += "\n\nIMPORTANT: When ending the conversation, say goodbye ONCE and then stay silent. Do not keep responding to goodbyes."
             if topic:
                 alice_system_prompt += f"\n\nThe conversation topic is: {topic}"
 
@@ -160,6 +161,7 @@ class DailyBotService:
             # Step 6: Create Bob's pipeline
             bob_system_prompt = self._bob_persona.generate_system_prompt()
             bob_system_prompt += "\n\nKeep responses to 1-2 short sentences. Be conversational."
+            bob_system_prompt += "\n\nIMPORTANT: When ending the conversation, say goodbye ONCE and then stay silent. Do not keep responding to goodbyes."
             if topic:
                 bob_system_prompt += f"\n\nThe conversation topic is: {topic}"
 

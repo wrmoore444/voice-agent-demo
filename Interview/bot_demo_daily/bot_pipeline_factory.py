@@ -112,7 +112,7 @@ class BotPipelineFactory:
             voice_id=voice_id,
             system_instruction=system_prompt,
             transcribe_model_audio=True,
-            transcribe_user_audio=True,
+            transcribe_user_audio=False,  # Disable to reduce latency
             params=GeminiInputParams(
                 temperature=0.8,
                 modalities=GeminiModalities.AUDIO,

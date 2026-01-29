@@ -110,6 +110,19 @@ class BotPipelineFactory:
             ),
         )
 
+        # Add transport event handlers for debugging
+        @transport.event_handler("on_transcription_message")
+        async def on_transcription(transport, message):
+            print(f"[TRANSCRIPTION] [{bot_name}] Received: {message}")
+
+        @transport.event_handler("on_participant_joined")
+        async def on_participant_joined(transport, participant):
+            print(f"[DAILY] [{bot_name}] Participant joined: {participant.get('info', {}).get('userName', 'unknown')}")
+
+        @transport.event_handler("on_first_participant_joined")
+        async def on_first_participant(transport, participant):
+            print(f"[DAILY] [{bot_name}] First participant joined")
+
         # Create text-based Gemini LLM
         llm = GoogleLLMService(
             api_key=self.gemini_api_key,

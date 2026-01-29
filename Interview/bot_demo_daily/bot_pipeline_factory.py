@@ -155,6 +155,8 @@ class BotPipelineFactory:
                         else:
                             speaker = "Bob" if bot_name == "Alice" else "Alice"
 
+                        print(f"[DEBUG] [{bot_name}] Raw transcript ({msg.role}): '{msg.content}'")
+
                         # If speaker changed, flush the buffer first
                         if transcript_buffer["speaker"] and transcript_buffer["speaker"] != speaker:
                             await flush_buffer()
@@ -162,9 +164,18 @@ class BotPipelineFactory:
                         transcript_buffer["speaker"] = speaker
                         transcript_buffer["text"] += msg.content
 
-                        # Check for sentence-ending punctuation
+                        # Check for sentence-ending punctuation or sufficient length
                         text = transcript_buffer["text"].strip()
-                        if text and text[-1] in ".?!":
+                        should_flush = False
+                        if text:
+                            # Flush on sentence-ending punctuation
+                            if text[-1] in ".?!":
+                                should_flush = True
+                            # Also flush if we have a lot of text (fallback)
+                            elif len(text) > 150:
+                                should_flush = True
+
+                        if should_flush:
                             await flush_buffer()
 
         # Create context for LLM

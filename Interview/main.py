@@ -3401,7 +3401,7 @@ async def daily_demo_viewer_page():
         </div>
 
         <div id="roomInfo" class="room-info">
-            Room: <a id="roomUrl" href="#" target="_blank"></a>
+            Daily Room Active
         </div>
 
         <div id="conversation" class="conversation">
@@ -3417,7 +3417,6 @@ async def daily_demo_viewer_page():
         const conversationDiv = document.getElementById('conversation');
         const statusDiv = document.getElementById('status');
         const roomInfoDiv = document.getElementById('roomInfo');
-        const roomUrlLink = document.getElementById('roomUrl');
 
         function formatPersonaLabel(filename) {
             let name = filename.replace('.json', '').replace(/^(alice_|bob_)/, '');
@@ -3535,8 +3534,6 @@ async def daily_demo_viewer_page():
                     statusDiv.innerHTML = `Started - ${aliceLabel} vs ${bobLabel}`;
 
                     if (data.room_url) {
-                        roomUrlLink.href = data.room_url;
-                        roomUrlLink.textContent = data.room_url;
                         roomInfoDiv.classList.add('visible');
                     }
                 } else {

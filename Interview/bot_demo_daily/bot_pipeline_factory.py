@@ -199,12 +199,15 @@ class BotPipelineFactory:
         context = OpenAILLMContext(messages)
         context_aggregator = llm.create_context_aggregator(context)
 
-        # Build pipeline - simplified for Gemini Live which manages context internally
+        # Build pipeline
         pipeline = Pipeline([
             transport.input(),
+            context_aggregator.user(),
+            transcript.user(),
             llm,
             transcript.assistant(),
             transport.output(),
+            context_aggregator.assistant(),
         ])
 
         # Create pipeline task

@@ -2996,16 +2996,15 @@ async def get_daily_personas():
 # -----------------------------------------------------------------------------
 @app.post("/daily-demo/start")
 async def start_daily_demo(
-    request: Request,
     topic: str = Query(default="", description="Conversation topic (optional)"),
     alice: str = Query(default=None, description="Alice persona filename (e.g., 'alice_bank_teller.json')"),
     bob: str = Query(default=None, description="Bob persona filename (e.g., 'bob_bank_upset_customer.json')"),
 ):
     """
-    Start a WebSocket-based bot-to-bot conversation.
+    Start a Daily WebRTC bot-to-bot conversation.
 
-    This creates a WebSocket room, has both bots connect to it, and starts the conversation.
-    Alice speaks first, then natural turn-taking occurs.
+    This creates a Daily room, has both bots join via WebRTC, and starts the conversation.
+    Alice speaks first, then natural turn-taking occurs through Daily's audio mixing.
 
     Query Parameters:
         topic: Optional topic to seed the conversation
@@ -3013,7 +3012,7 @@ async def start_daily_demo(
         bob: Bob persona filename (defaults to bob_insurance_frustrated_claimant.json)
 
     Returns:
-        JSON with status, selected personas, and room ID
+        JSON with status, selected personas, and room URL
 
     Errors:
         400: If a conversation is already running or failed to start
@@ -3021,11 +3020,6 @@ async def start_daily_demo(
     Example:
         POST /daily-demo/start?alice=alice_bank_teller.json&bob=bob_bank_upset_customer.json
     """
-    # Set the base URL for WebSocket connections based on the request
-    base_url = str(request.base_url).rstrip("/")
-    ws_base_url = base_url.replace("http://", "ws://").replace("https://", "wss://")
-    daily_demo_service.set_base_url(ws_base_url)
-
     success = await daily_demo_service.start(
         topic=topic,
         alice_persona=alice,
@@ -3037,12 +3031,12 @@ async def start_daily_demo(
     state = daily_demo_service.get_state()
     return {
         "status": "started",
-        "implementation": "websocket",
+        "implementation": "daily",
         "alice_persona": state.get("alice_persona"),
         "bob_persona": state.get("bob_persona"),
         "topic": state.get("topic"),
-        "room_id": state.get("room_id"),
-        "message": "WebSocket bot conversation started"
+        "room_url": state.get("room_url"),
+        "message": "Daily WebRTC bot conversation started"
     }
 
 
@@ -3150,7 +3144,7 @@ async def daily_demo_viewer_page():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebSocket Bot-to-Bot Conversation</title>
+    <title>Daily Bot-to-Bot Conversation</title>
     <style>
         * {
             box-sizing: border-box;
@@ -3373,8 +3367,8 @@ async def daily_demo_viewer_page():
 </head>
 <body>
     <div class="container">
-        <h1>WebSocket Bot-to-Bot<span class="badge">WS</span></h1>
-        <p class="subtitle">Real-time voice conversation through WebSocket room</p>
+        <h1>Daily Bot-to-Bot<span class="badge">Daily</span></h1>
+        <p class="subtitle">Real-time voice conversation through Daily.co WebRTC</p>
 
         <div class="persona-row">
             <div class="persona-box alice">
@@ -3403,7 +3397,7 @@ async def daily_demo_viewer_page():
         </div>
 
         <div id="roomInfo" class="room-info">
-            Room ID: <span id="roomId"></span>
+            Room: <a id="roomUrl" href="#" target="_blank"></a>
         </div>
 
         <div id="conversation" class="conversation">
@@ -3419,7 +3413,7 @@ async def daily_demo_viewer_page():
         const conversationDiv = document.getElementById('conversation');
         const statusDiv = document.getElementById('status');
         const roomInfoDiv = document.getElementById('roomInfo');
-        const roomIdSpan = document.getElementById('roomId');
+        const roomUrlLink = document.getElementById('roomUrl');
 
         function formatPersonaLabel(filename) {
             let name = filename.replace('.json', '').replace(/^(alice_|bob_)/, '');
@@ -3536,8 +3530,9 @@ async def daily_demo_viewer_page():
                     const bobLabel = formatPersonaLabel(bob);
                     statusDiv.innerHTML = `Started - ${aliceLabel} vs ${bobLabel}`;
 
-                    if (data.room_id) {
-                        roomIdSpan.textContent = data.room_id;
+                    if (data.room_url) {
+                        roomUrlLink.href = data.room_url;
+                        roomUrlLink.textContent = data.room_url;
                         roomInfoDiv.classList.add('visible');
                     }
                 } else {

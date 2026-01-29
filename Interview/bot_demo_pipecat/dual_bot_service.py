@@ -667,15 +667,13 @@ class PipecatDualBotService:
         self._tts_alice: Optional[PipecatTTSPipeline] = None
         self._tts_bob: Optional[PipecatTTSPipeline] = None
 
-        # Separate queues for parallel processing
-        # Using separate queues allows Alice and Bob's audio to be
-        # generated simultaneously by their respective workers
-        self._tts_queue_alice: asyncio.Queue[TTSJob] = asyncio.Queue()
-        self._tts_queue_bob: asyncio.Queue[TTSJob] = asyncio.Queue()
+        # Single shared queue for sequential processing
+        # Using a single queue ensures audio is always played in correct order
+        # (parallel queues could cause out-of-order audio delivery)
+        self._tts_queue_shared: asyncio.Queue[TTSJob] = asyncio.Queue()
 
-        # Worker tasks (one per speaker)
-        self._tts_task_alice: Optional[asyncio.Task] = None
-        self._tts_task_bob: Optional[asyncio.Task] = None
+        # Single worker task for sequential processing
+        self._tts_task_shared: Optional[asyncio.Task] = None
 
         # Global sequence counter for audio ordering
         # Browser uses this to play audio segments in correct order
@@ -782,22 +780,18 @@ class PipecatDualBotService:
                 await self._init_tts()
 
                 # Clear any stale jobs from previous conversations
-                for q in [self._tts_queue_alice, self._tts_queue_bob]:
-                    while not q.empty():
-                        try:
-                            q.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
+                while not self._tts_queue_shared.empty():
+                    try:
+                        self._tts_queue_shared.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
 
-                # Start parallel TTS worker tasks
-                # Each worker processes jobs for its respective speaker
-                self._tts_task_alice = asyncio.create_task(
-                    self._tts_worker("Alice", self._tts_queue_alice, self._tts_alice)
+                # Start single TTS worker task (sequential processing)
+                # This ensures audio is always delivered in correct order
+                self._tts_task_shared = asyncio.create_task(
+                    self._tts_worker_shared()
                 )
-                self._tts_task_bob = asyncio.create_task(
-                    self._tts_worker("Bob", self._tts_queue_bob, self._tts_bob)
-                )
-                logger.info("ElevenLabs TTS audio generation enabled (via Pipecat, parallel)")
+                logger.info("ElevenLabs TTS audio generation enabled (via Pipecat, sequential)")
 
             # -----------------------------------------------------------------
             # STEP 6: Start the main conversation loop
@@ -854,25 +848,23 @@ class PipecatDualBotService:
         self._orchestrator_task = None
 
         # -----------------------------------------------------------------
-        # STEP 2: Wait for TTS workers to finish
+        # STEP 2: Wait for TTS worker to finish
         # -----------------------------------------------------------------
-        # TTS workers check both is_running AND queue.empty() before stopping,
-        # so they will continue processing until all queued jobs are done
-        for task in [self._tts_task_alice, self._tts_task_bob]:
-            if task and not task.done():
+        # TTS worker checks both is_running AND queue.empty() before stopping,
+        # so it will continue processing until all queued jobs are done
+        if self._tts_task_shared and not self._tts_task_shared.done():
+            try:
+                # Give worker up to 30 seconds to finish
+                await asyncio.wait_for(self._tts_task_shared, timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.warning("TTS worker timed out, cancelling")
+                self._tts_task_shared.cancel()
                 try:
-                    # Give workers up to 30 seconds to finish
-                    await asyncio.wait_for(task, timeout=30.0)
-                except asyncio.TimeoutError:
-                    logger.warning("TTS worker timed out, cancelling")
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
+                    await self._tts_task_shared
+                except asyncio.CancelledError:
+                    pass
 
-        self._tts_task_alice = None
-        self._tts_task_bob = None
+        self._tts_task_shared = None
 
         # -----------------------------------------------------------------
         # STEP 3: Stop TTS pipelines
@@ -918,10 +910,10 @@ class PipecatDualBotService:
                 "tts_queue_size": 0,
             }
 
-        # Calculate total pending TTS jobs across both queues
+        # Calculate pending TTS jobs in shared queue
         tts_queue_size = 0
         if self._audio_enabled:
-            tts_queue_size = self._tts_queue_alice.qsize() + self._tts_queue_bob.qsize()
+            tts_queue_size = self._tts_queue_shared.qsize()
 
         return {
             **self.state.to_dict(),
@@ -1504,11 +1496,10 @@ class PipecatDualBotService:
 
     async def _queue_tts(self, speaker: str, text: str, pace: float, energy: str, overlap_ms: int):
         """
-        Add a TTS job to the appropriate speaker's queue.
+        Add a TTS job to the shared queue.
 
-        TTS jobs are processed asynchronously by dedicated worker tasks.
-        Using separate queues for Alice and Bob allows parallel processing,
-        which roughly doubles throughput.
+        TTS jobs are processed sequentially by a single worker to ensure
+        audio is always delivered in the correct order.
 
         Args:
             speaker: "Alice" or "Bob"
@@ -1532,9 +1523,8 @@ class PipecatDualBotService:
             overlap_ms=overlap_ms,
         )
 
-        # Route to the correct queue based on speaker
-        queue = self._tts_queue_alice if speaker == "Alice" else self._tts_queue_bob
-        await queue.put(job)
+        # Add to shared queue for sequential processing
+        await self._tts_queue_shared.put(job)
         logger.debug(f"Queued TTS job #{job.sequence} for {speaker}")
 
     async def _tts_worker(
@@ -1628,3 +1618,79 @@ class PipecatDualBotService:
                 logger.exception(f"[{speaker}] Error in TTS worker: {e}")
 
         logger.info(f"TTS worker for {speaker} stopped")
+
+    async def _tts_worker_shared(self):
+        """
+        Single background worker that processes TTS jobs for both speakers.
+
+        Unlike the parallel workers, this processes jobs sequentially to ensure
+        audio is always delivered in the correct order.
+
+        LIFECYCLE:
+        ----------
+        - Starts when conversation begins (if audio enabled)
+        - Runs continuously, processing jobs as they arrive
+        - Continues AFTER conversation ends to finish remaining jobs
+        - Stops when: conversation stopped AND queue is empty
+        """
+        logger.info("Shared TTS worker started")
+
+        # Continue while conversation is running OR there are pending jobs
+        while (self.state and self.state.is_running) or not self._tts_queue_shared.empty():
+            try:
+                # Try to get a job from the queue (with timeout)
+                try:
+                    job = await asyncio.wait_for(self._tts_queue_shared.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    # No job available - check if we should exit
+                    if not (self.state and self.state.is_running) and self._tts_queue_shared.empty():
+                        break
+                    continue
+
+                speaker = job.speaker
+                logger.debug(f"[{speaker}] Processing TTS job #{job.sequence}")
+
+                # Select the appropriate pipeline based on speaker
+                pipeline = self._tts_alice if speaker == "Alice" else self._tts_bob
+
+                # Validate pipeline is available
+                if not pipeline:
+                    logger.warning(f"[{speaker}] TTS pipeline not initialized")
+                    continue
+
+                # ---------------------------------------------------------
+                # SYNTHESIZE AUDIO
+                # ---------------------------------------------------------
+                audio_data = await pipeline.synthesize(job.text)
+
+                if audio_data:
+                    # ---------------------------------------------------------
+                    # BROADCAST AUDIO TO VIEWERS
+                    # ---------------------------------------------------------
+                    audio_message = {
+                        "type": "audio",
+                        "data": {
+                            "speaker": job.speaker,
+                            "audio": base64.b64encode(audio_data).decode('utf-8'),
+                            "format": "pcm",
+                            "sample_rate": 24000,
+                            "sequence": job.sequence,
+                            "pace": job.pace,
+                            "energy": job.energy,
+                            "overlap_ms": job.overlap_ms,
+                            "timestamp": datetime.utcnow().isoformat(),
+                        }
+                    }
+
+                    await self.bridge_state.broadcast_to_viewers(audio_message)
+                    logger.info(f"[{speaker}] TTS job #{job.sequence} complete: {len(audio_data)} bytes")
+                else:
+                    logger.warning(f"[{speaker}] TTS job #{job.sequence} produced no audio")
+
+            except asyncio.CancelledError:
+                logger.info("Shared TTS worker cancelled")
+                break
+            except Exception as e:
+                logger.exception(f"Error in shared TTS worker: {e}")
+
+        logger.info("Shared TTS worker stopped")

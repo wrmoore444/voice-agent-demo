@@ -711,7 +711,7 @@ IMPORTANT: Once goodbyes have been exchanged, call `end_conversation` right away
 
     async def delayed_disconnect():
         """Wait for audio to finish playing, then disconnect"""
-        await asyncio.sleep(6)  # Give time for goodbye audio to play
+        await asyncio.sleep(4)  # Give time for goodbye audio to play
         logger.info(f"[Demo] Auto-disconnecting after goodbye exchange")
         if task_ref["task"]:
             await task_ref["task"].cancel()

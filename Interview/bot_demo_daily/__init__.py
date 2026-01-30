@@ -19,6 +19,6 @@ USAGE:
 """
 
 from .daily_bot_service import DailyBotService
-from bot_demo_pipecat.persona_loader import list_personas
+from .persona_loader import list_personas
 
 __all__ = ["DailyBotService", "list_personas"]

@@ -42,8 +42,8 @@ from pipecat.pipeline.runner import PipelineRunner
 from .daily_room_manager import DailyRoomManager, RoomInfo
 from .bot_pipeline_factory import BotPipelineFactory, BotContext
 
-# Reuse persona loader from pipecat demo
-from bot_demo_pipecat.persona_loader import load_persona, Persona, get_default_personas
+# Local persona loader
+from .persona_loader import load_persona, Persona, get_default_personas
 
 
 @dataclass

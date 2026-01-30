@@ -84,12 +84,12 @@ class BotPipelineFactory:
         voice_id = GEMINI_VOICES.get(bot_name, "Aoede")
 
         # Create Daily transport (positional args: room_url, token, bot_name, params)
-        # Use faster VAD settings for snappier turn-taking
+        # VAD tuned for fast but non-fragmenting turn detection
         vad_params = VADParams(
-            min_volume=0.4,           # Slightly higher threshold to ignore background noise
-            start_secs=0.1,           # Start detecting speech quickly
-            stop_secs=0.1,            # Shorter silence before considering speech ended
-            confidence=0.7,           # Balance between responsiveness and accuracy
+            min_volume=0.4,
+            start_secs=0.12,          # Fast speech start detection
+            stop_secs=0.35,           # Fast end-of-turn without chopping speech
+            confidence=0.65,
         )
         transport = DailyTransport(
             room_url,
@@ -134,28 +134,12 @@ class BotPipelineFactory:
         # Create transcript processor
         transcript = TranscriptProcessor()
 
-        # Buffer for accumulating transcriptions until sentence completion
-        transcript_buffer = {"speaker": None, "text": ""}
-
-        async def flush_buffer():
-            """Send buffered text to viewers."""
-            if transcript_buffer["text"].strip() and broadcast_callback:
-                print(f"[TRANSCRIPT] {transcript_buffer['speaker']}: {transcript_buffer['text'].strip()}")
-                await broadcast_callback({
-                    "type": "message",
-                    "data": {
-                        "speaker": transcript_buffer["speaker"],
-                        "text": transcript_buffer["text"].strip(),
-                        "timestamp": datetime.utcnow().isoformat(),
-                    }
-                })
-                transcript_buffer["text"] = ""
-
         # Set up transcript event handler to broadcast to viewers
+        # Flush immediately for lower perceived latency (UI can group if needed)
         if broadcast_callback:
             @transcript.event_handler("on_transcript_update")
             async def on_transcript_update(processor, frame):
-                """Broadcast transcriptions to WebSocket viewers, buffering until sentence end."""
+                """Broadcast transcriptions to WebSocket viewers immediately."""
                 for msg in frame.messages:
                     if isinstance(msg, TranscriptionMessage):
                         # Only broadcast assistant (this bot's) transcriptions
@@ -163,29 +147,17 @@ class BotPipelineFactory:
                         if msg.role != "assistant":
                             continue
 
-                        speaker = bot_name
                         print(f"[DEBUG] [{bot_name}] Raw transcript: '{msg.content}'")
 
-                        # If speaker changed, flush the buffer first
-                        if transcript_buffer["speaker"] and transcript_buffer["speaker"] != speaker:
-                            await flush_buffer()
-
-                        transcript_buffer["speaker"] = speaker
-                        transcript_buffer["text"] += msg.content
-
-                        # Check for sentence-ending punctuation or sufficient length
-                        text = transcript_buffer["text"].strip()
-                        should_flush = False
-                        if text:
-                            # Flush on sentence-ending punctuation
-                            if text[-1] in ".?!":
-                                should_flush = True
-                            # Also flush if we have a lot of text (fallback)
-                            elif len(text) > 150:
-                                should_flush = True
-
-                        if should_flush:
-                            await flush_buffer()
+                        # Flush immediately - don't buffer
+                        await broadcast_callback({
+                            "type": "message",
+                            "data": {
+                                "speaker": bot_name,
+                                "text": msg.content,
+                                "timestamp": datetime.utcnow().isoformat(),
+                            }
+                        })
 
         # Create context for LLM
         messages = [
@@ -195,12 +167,12 @@ class BotPipelineFactory:
             }
         ]
         context = OpenAILLMContext(messages)
-        # Reduce timeouts to minimize turn-taking latency
+        # Small nonzero timeouts - fast but avoids "never finalizes" issues
         context_aggregator = llm.create_context_aggregator(
             context,
             user_params=LLMUserAggregatorParams(
-                aggregation_timeout=0.0,           # Default is 0.5s
-                turn_emulated_vad_timeout=0.0,     # Default is 0.8s
+                aggregation_timeout=0.15,          # Default is 0.5s
+                turn_emulated_vad_timeout=0.20,    # Default is 0.8s
             )
         )
 

@@ -195,10 +195,13 @@ class BotPipelineFactory:
             }
         ]
         context = OpenAILLMContext(messages)
-        # Reduce aggregation timeout to minimize turn-taking latency (default is 0.5s)
+        # Reduce timeouts to minimize turn-taking latency
         context_aggregator = llm.create_context_aggregator(
             context,
-            user_params=LLMUserAggregatorParams(aggregation_timeout=0.0)
+            user_params=LLMUserAggregatorParams(
+                aggregation_timeout=0.0,           # Default is 0.5s
+                turn_emulated_vad_timeout=0.0,     # Default is 0.8s
+            )
         )
 
         # Build pipeline

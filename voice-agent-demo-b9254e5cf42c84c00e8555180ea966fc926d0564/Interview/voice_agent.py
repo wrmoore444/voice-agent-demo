@@ -1,3 +1,59 @@
+"""
+=============================================================================
+VOICE_AGENT.PY - Real-time Voice Conversation Handler
+=============================================================================
+
+This module handles real-time voice conversations between humans and AI agents.
+It uses Pipecat's pipeline architecture with Gemini Live for speech-native AI.
+
+TWO MAIN FUNCTIONS:
+-------------------
+1. run_voice_bot() - Full-featured voice bot with database persistence
+   - Saves transcriptions to database in batches
+   - Extracts datapoints after conversation ends
+   - Sends email summaries
+   - Used for production agent conversations
+
+2. run_human_voice_demo() - Simplified demo for human-to-agent chat
+   - No database persistence
+   - Uses persona-based system prompts
+   - Used for the /human-demo/* endpoints
+
+PIPELINE ARCHITECTURE:
+----------------------
+    Browser Mic → WebSocket → VAD → Context Aggregator → Gemini Live LLM
+                                                              ↓
+    Browser Speaker ← WebSocket ← [TTS if agent_id=3] ← Transcript
+
+KEY COMPONENTS:
+---------------
+- FastAPIWebsocketTransport: Handles browser WebSocket connections
+- GeminiLiveLLMService: Speech-native Gemini model (listens & speaks)
+- SileroVADAnalyzer: Voice Activity Detection for turn-taking
+- TranscriptProcessor: Captures transcriptions for logging/saving
+- ElevenLabsTTSService: Optional TTS for text-mode agents
+
+CONVERSATION ENDING:
+--------------------
+The bot has an `end_conversation` function tool that it calls when:
+- User says goodbye, thanks, or indicates they're done
+- The bot has said its farewell
+
+This triggers:
+1. Final farewell TTS
+2. Save remaining transcriptions to database
+3. Extract datapoints using Gemini
+4. Send email summary
+5. Close the WebSocket connection
+
+ENVIRONMENT VARIABLES:
+----------------------
+- GEMINI_API_KEY: Required for Gemini Live LLM
+- ELEVENLABS_API_KEY: Required if agent_id=3 (ElevenLabs mode)
+- DATABASE_URL: For saving transcriptions
+- GMAIL_ADDRESS/GMAIL_APP_PASSWORD: For email summaries
+"""
+
 import sys
 import asyncio
 from dotenv import load_dotenv

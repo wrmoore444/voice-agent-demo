@@ -1,3 +1,60 @@
+"""
+=============================================================================
+MAIN.PY - FastAPI Server for Voice Agent Demo
+=============================================================================
+
+This is the main entry point for the Voice Agent Demo application. It provides
+a FastAPI server with multiple demo modes for AI-powered voice conversations.
+
+DEMO MODES:
+-----------
+1. PIPECAT BOT-TO-BOT (/pipecat-demo/*)
+   - Two AI bots (Alice & Bob) converse with each other
+   - Uses ElevenLabs TTS for voice synthesis
+   - Text-based turn-taking with simulated audio
+
+2. DAILY BOT-TO-BOT (/daily-demo/*)
+   - Two AI bots converse via Daily.co WebRTC
+   - Real-time audio with Gemini Live's native voice
+   - Requires DAILY_API_KEY
+
+3. HUMAN-TO-AGENT (/human-demo/*)
+   - Human user talks to an AI agent via browser microphone
+   - Real-time voice conversation with Gemini Live
+
+HOW TO RUN:
+-----------
+    python main.py
+
+Then open http://localhost:8001 in your browser.
+
+REQUIRED ENVIRONMENT VARIABLES:
+-------------------------------
+- GEMINI_API_KEY: Google Gemini API key (required for all modes)
+- DATABASE_URL: Database connection string (SQLite default works)
+- ELEVENLABS_API_KEY: ElevenLabs API key (for Pipecat audio mode)
+- DAILY_API_KEY: Daily.co API key (for Daily demo mode)
+
+OPTIONAL ENVIRONMENT VARIABLES:
+-------------------------------
+- ELEVENLABS_VOICE_ID_ALICE: Custom voice ID for Alice
+- ELEVENLABS_VOICE_ID_BOB: Custom voice ID for Bob
+- GMAIL_ADDRESS / GMAIL_APP_PASSWORD: For email summaries
+
+API DOCUMENTATION:
+------------------
+- Pipecat Demo: See bot_demo_pipecat/API_REFERENCE.md
+- Daily Demo: Similar endpoints under /daily-demo/*
+
+FILE STRUCTURE:
+---------------
+- /demo/* - Original demo endpoints (legacy)
+- /pipecat-demo/* - Pipecat-based bot-to-bot demo
+- /daily-demo/* - Daily WebRTC bot-to-bot demo
+- /human-demo/* - Human voice interaction demo
+- /users/*, /agents/*, /conversations/* - Database CRUD endpoints
+"""
+
 # Load environment variables from .env file before any other imports
 from dotenv import load_dotenv
 load_dotenv(override=True)

@@ -220,13 +220,15 @@ class DailyBotService:
         speech_complete = asyncio.Event()
 
         # Create transport
+        # audio_in_enabled=True is required to keep the transport connected
         transport = DailyTransport(
             room_url,
             token,
             name,
             DailyParams(
-                audio_in_enabled=False,  # No input - output only
+                audio_in_enabled=True,
                 audio_out_enabled=True,
+                audio_in_sample_rate=16000,
                 audio_out_sample_rate=24000,
                 vad_enabled=False,
                 transcription_enabled=False,
@@ -239,8 +241,10 @@ class DailyBotService:
         # Create notifier to detect speech completion
         notifier = SpeechCompleteNotifier(speech_complete)
 
-        # Build pipeline: TTS → Notifier → Transport output
+        # Build pipeline: Input (keeps connected) → TTS → Notifier → Output
+        # The transport.input() is essential - it keeps the pipeline running
         pipeline = Pipeline([
+            transport.input(),
             tts,
             notifier,
             transport.output(),

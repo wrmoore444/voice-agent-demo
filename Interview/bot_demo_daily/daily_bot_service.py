@@ -323,9 +323,9 @@ class DailyBotService:
 
         # Pipeline: input → FILTER → start_tracker → tts → tts_tracker → output
         pipeline = Pipeline([
+            start_tracker,
             transport.input(),
             InputFrameFilter(name),
-            start_tracker,
             tts,
             tts_tracker,
             transport.output(),

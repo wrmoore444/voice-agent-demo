@@ -28,6 +28,7 @@ from loguru import logger
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineTask, PipelineParams
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.processors.aggregators.llm_response import LLMUserAggregatorParams
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
 from pipecat.transcriptions.language import Language
@@ -194,7 +195,11 @@ class BotPipelineFactory:
             }
         ]
         context = OpenAILLMContext(messages)
-        context_aggregator = llm.create_context_aggregator(context)
+        # Reduce aggregation timeout to minimize turn-taking latency (default is 0.5s)
+        context_aggregator = llm.create_context_aggregator(
+            context,
+            user_params=LLMUserAggregatorParams(aggregation_timeout=0.0)
+        )
 
         # Build pipeline
         pipeline = Pipeline([

@@ -8,14 +8,18 @@ ARCHITECTURE (NON-NEGOTIABLE):
 - Both stay connected to the Daily room throughout
 - They take turns speaking, driven by their personas
 
-Each pipeline:
-    transport.input() → (filter/control only) → tts → trackers → transport.output()
+IMPORTANT FIXES IN THIS VERSION
+1) DailyTransport.input() produces inbound AUDIO frames.
+   Those MUST NOT flow into the TTS processor (TTS expects TTSSpeakFrame/text).
+   We insert an InputFrameFilter after transport.input() to only forward lifecycle
+   frames (Start/Cancel/End). Everything else from input is dropped.
 
-IMPORTANT:
-- DailyTransport.input() produces inbound AUDIO frames (and other transport frames).
-- Those MUST NOT flow into TTS (TTS expects text frames like TTSSpeakFrame).
-- We therefore filter input → allow only lifecycle/control frames through.
-- Speech is driven by queueing TTSSpeakFrame directly into the PipelineTask.
+2) PipelineTask constructor differs across pipecat versions.
+   We try PipelineTask(pipeline, params=PipelineParams(...)) and fall back to
+   PipelineTask(pipeline) if needed.
+
+3) Do NOT manage FrameProcessor._started manually in custom processors.
+   It can trigger "StartFrame not received yet" errors. We simply pass frames.
 """
 
 import asyncio
@@ -28,30 +32,19 @@ from .bot_pipeline_factory import TurnBasedBotFactory, BotConfig
 from .persona_loader import load_persona, get_default_personas
 
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
-from pipecat.frames.frames import (
-    Frame,
-    StartFrame,
-    CancelFrame,
-    EndFrame,
-    TTSSpeakFrame,
-)
-
-# Some versions/services emit this; some don’t.
-try:
-    from pipecat.frames.frames import TTSStoppedFrame  # type: ignore
-except Exception:
-    TTSStoppedFrame = None  # type: ignore
-
-# Daily inbound audio frame type varies by pipecat version; be defensive.
-try:
-    from pipecat.frames.frames import AudioRawFrame  # type: ignore
-except Exception:
-    AudioRawFrame = None  # type: ignore
-
+from pipecat.frames.frames import TTSSpeakFrame, EndFrame, TTSStoppedFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineTask, PipelineParams
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
+from pipecat.frames.frames import Frame, StartFrame, CancelFrame
+
+
+# Some pipecat versions expose AudioRawFrame; be defensive.
+try:
+    from pipecat.frames.frames import AudioRawFrame  # type: ignore
+except Exception:
+    AudioRawFrame = None  # type: ignore
 
 
 MAX_TURNS = 20
@@ -69,17 +62,14 @@ GOODBYE_PHRASES = [
 
 class InputFrameFilter(FrameProcessor):
     """
-    Prevent Daily inbound audio (and other unrelated frames) from flowing into TTS.
+    Filters frames coming from DailyTransport.input().
 
-    Rationale:
-      DailyTransport.input() yields inbound audio frames from the room.
-      If those frames hit a TTS processor, the pipeline can stall or behave oddly.
+    We allow only lifecycle frames through:
+      - StartFrame
+      - CancelFrame
+      - EndFrame (rare via input, but harmless)
 
-    We only allow lifecycle frames through from input:
-      StartFrame, CancelFrame, EndFrame
-    Everything else from input is dropped.
-
-    TTSSpeakFrame enters the pipeline via task.queue_frames(), not via input().
+    Everything else is dropped, especially inbound audio frames.
     """
 
     def __init__(self, name: str):
@@ -91,39 +81,19 @@ class InputFrameFilter(FrameProcessor):
             await self.push_frame(frame, direction)
             return
 
-        # Drop inbound audio frames explicitly when we can detect them
+        # Explicitly drop raw audio if type is available
         if AudioRawFrame is not None and isinstance(frame, AudioRawFrame):
             return
 
-        # Otherwise: drop everything else from transport.input()
+        # Drop everything else coming from transport.input()
         return
-
-
-class StartTracker(FrameProcessor):
-    """
-    Sets bot.started when we see StartFrame flow through the pipeline.
-    This is safer than sleeping an arbitrary number of seconds.
-    """
-
-    def __init__(self, name: str, started_event: asyncio.Event):
-        super().__init__()
-        self._name = name
-        self._started_event = started_event
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        if isinstance(frame, StartFrame):
-            if not self._started_event.is_set():
-                print(f"[TRACKER] {self._name} pipeline started")
-                self._started_event.set()
-
-        await self.push_frame(frame, direction)
 
 
 class TTSCompletionTracker(FrameProcessor):
     """
-    Tracks when TTS finishes speaking by watching for TTSStoppedFrame (if emitted).
-    Some TTS backends DO NOT emit TTSStoppedFrame reliably; we use a time-based
-    fallback in _speak_and_wait regardless.
+    Tracks when TTS finishes speaking by watching for TTSStoppedFrame.
+
+    IMPORTANT: Do NOT manage self._started here. Let pipecat handle lifecycle.
     """
 
     def __init__(self, name: str, on_speech_done: asyncio.Event):
@@ -132,10 +102,11 @@ class TTSCompletionTracker(FrameProcessor):
         self._on_speech_done = on_speech_done
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
-        if TTSStoppedFrame is not None and isinstance(frame, TTSStoppedFrame):
+        if isinstance(frame, TTSStoppedFrame):
             print(f"[TRACKER] {self._name} TTS stopped")
             self._on_speech_done.set()
 
+        # Always pass frames through
         await self.push_frame(frame, direction)
 
 
@@ -171,7 +142,6 @@ class BotPipeline:
     task: PipelineTask
     runner_task: Optional[asyncio.Task] = None
     speech_done: asyncio.Event = field(default_factory=asyncio.Event)
-    started: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class DailyBotService:
@@ -247,21 +217,16 @@ class DailyBotService:
                 bob_prompt += f"\n\nConversation topic: {topic}"
 
             # Create PERSISTENT pipelines for both bots
-            self._alice = self._create_persistent_pipeline(
-                "Alice", alice_prompt, self._room_info.alice_token
-            )
-            self._bob = self._create_persistent_pipeline(
-                "Bob", bob_prompt, self._room_info.bob_token
-            )
+            self._alice = self._create_persistent_pipeline("Alice", alice_prompt, self._room_info.alice_token)
+            self._bob = self._create_persistent_pipeline("Bob", bob_prompt, self._room_info.bob_token)
 
             # Start both pipelines - they stay running throughout
             self._alice.runner_task = asyncio.create_task(self._run_pipeline(self._alice))
             self._bob.runner_task = asyncio.create_task(self._run_pipeline(self._bob))
 
-            # Wait for both pipelines to actually start
-            print("[SERVICE] Waiting for pipelines to start...")
-            await asyncio.wait_for(self._alice.started.wait(), timeout=20.0)
-            await asyncio.wait_for(self._bob.started.wait(), timeout=20.0)
+            # Wait a moment for bots to join the room (simple + reliable)
+            print("[SERVICE] Waiting for bots to join room...")
+            await asyncio.sleep(3.0)
 
             # Start the conversation loop
             self._conversation_task = asyncio.create_task(self._conversation_loop())
@@ -278,11 +243,6 @@ class DailyBotService:
             await self._cleanup()
             return False
 
-    async def stop(self):
-        """Stop the conversation and cleanup."""
-        self._stop_requested = True
-        await self._cleanup()
-
     def _create_persistent_pipeline(
         self,
         name: str,
@@ -290,14 +250,11 @@ class DailyBotService:
         token: str,
     ) -> BotPipeline:
         """Create a persistent pipeline that stays connected."""
-        if not self._factory:
-            raise RuntimeError("Factory not initialized")
-        if not self._room_info:
-            raise RuntimeError("Room info not initialized")
+        if not self._factory or not self._room_info:
+            raise RuntimeError("Factory/Room info not initialized")
 
         config = self._factory.create_bot_config(name, system_prompt)
         speech_done = asyncio.Event()
-        started = asyncio.Event()
 
         # Transport stays connected
         transport = DailyTransport(
@@ -317,113 +274,152 @@ class DailyBotService:
         # TTS service
         tts = self._factory.create_tts_service(config)
 
-        # Trackers
-        start_tracker = StartTracker(name, started)
-        tts_tracker = TTSCompletionTracker(name, speech_done)
+        # Tracker to detect when TTS finishes
+        tracker = TTSCompletionTracker(name, speech_done)
 
-        # Pipeline: input → FILTER → start_tracker → tts → tts_tracker → output
+        # Pipeline:
+        #   input → FILTER (drop inbound audio) → tts → tracker → output
         pipeline = Pipeline([
-            start_tracker,
             transport.input(),
             InputFrameFilter(name),
             tts,
-            tts_tracker,
+            tracker,
             transport.output(),
         ])
 
+        # PipelineTask constructor varies across pipecat versions.
         try:
-            # Some pipecat versions accept keyword "params"
             task = PipelineTask(
                 pipeline,
                 params=PipelineParams(
                     allow_interruptions=False,
+                    enable_metrics=False,
                 ),
             )
         except TypeError:
-            # Older pipecat versions: only PipelineTask(pipeline)
             task = PipelineTask(pipeline)
 
-            # Best-effort: some versions support setting params after construction
-            if hasattr(task, "set_params"):
-                task.set_params(PipelineParams(allow_interruptions=False))
+        print(f"[SERVICE] Created persistent pipeline for {name}")
 
         return BotPipeline(
             name=name,
             config=config,
             task=task,
             speech_done=speech_done,
-            started=started,
         )
 
     async def _run_pipeline(self, bot: BotPipeline):
-        """Run a bot pipeline forever until cancelled."""
-        runner = PipelineRunner()
+        """Run a bot's pipeline - stays running until stopped."""
         try:
+            print(f"[PIPELINE] {bot.name} starting (persistent)...")
+            runner = PipelineRunner(handle_sigint=False)
             await runner.run(bot.task)
+            print(f"[PIPELINE] {bot.name} ended")
         except asyncio.CancelledError:
-            pass
+            print(f"[PIPELINE] {bot.name} cancelled")
         except Exception as e:
-            print(f"[PIPELINE] {bot.name} crashed: {e}")
+            print(f"[PIPELINE] {bot.name} error: {e}")
             import traceback
             traceback.print_exc()
 
-    async def _conversation_loop(self):
-        """Turn-based conversation loop."""
-        if not self.state:
-            return
-        if not self._alice or not self._bob:
-            return
-        if not self._factory:
-            return
+    async def stop(self) -> bool:
+        """Stop the conversation and both pipelines."""
+        if not self.state or not self.state.is_running:
+            return False
 
+        print("[SERVICE] Stopping...")
+        self._stop_requested = True
+        self.state.is_running = False
+
+        # Cancel conversation loop
+        if self._conversation_task and not self._conversation_task.done():
+            self._conversation_task.cancel()
+            try:
+                await asyncio.wait_for(self._conversation_task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+
+        # Stop both pipelines
+        for bot in [self._alice, self._bob]:
+            if bot and bot.runner_task and not bot.runner_task.done():
+                try:
+                    await bot.task.queue_frames([EndFrame()])
+                except Exception:
+                    pass
+                bot.runner_task.cancel()
+                try:
+                    await asyncio.wait_for(bot.runner_task, timeout=5.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+
+        await self._cleanup()
+        print("[SERVICE] Stopped")
+        return True
+
+    async def _cleanup(self):
+        if self._room_manager and self._room_info:
+            try:
+                await self._room_manager.delete_room(self._room_info.room_name)
+            except Exception as e:
+                print(f"[SERVICE] Error deleting room: {e}")
+        self._room_info = None
+        self._alice = None
+        self._bob = None
+
+    async def _conversation_loop(self):
+        """Alternates turns between the two persistent pipelines."""
         try:
             current = self._alice
 
-            for _ in range(MAX_TURNS):
-                if self._stop_requested:
+            while not self._stop_requested and self.state.turn_count < MAX_TURNS:
+                self.state.turn_count += 1
+                print(f"[CONV] Turn {self.state.turn_count}: {current.name}")
+
+                # Update history for the current bot (factory uses this)
+                current.config.conversation_history = [
+                    {"speaker": h["speaker"], "text": h["text"]}
+                    for h in self._conversation_history
+                ]
+
+                # Generate response (your factory has generate_response)
+                response_text = await self._factory.generate_response(current.config)
+
+                if not response_text:
+                    print(f"[CONV] {current.name} empty response, ending")
                     break
 
-                self.state.turn_count += 1
-
-                # Generate next response text using your factory/model layer
-                response_text = await self._factory.generate_bot_response(
-                    speaker=current.name,
-                    conversation_history=self._conversation_history,
-                    topic=self.state.topic,
-                    system_prompt=current.config.system_prompt,
-                )
-
-                # Record + broadcast
-                msg = {
+                # Broadcast to viewers
+                await self._broadcast_message({
                     "type": "message",
                     "data": {
                         "speaker": current.name,
                         "text": response_text,
                         "timestamp": datetime.utcnow().isoformat(),
-                    },
-                }
+                    }
+                })
+
+                # Add to history
                 self._conversation_history.append({
                     "speaker": current.name,
                     "text": response_text,
                     "timestamp": datetime.utcnow().isoformat(),
                 })
-                await self._broadcast_message(msg)
 
-                # Speak and wait
+                # Queue speech and wait for completion
                 await self._speak_and_wait(current, response_text)
 
-                # Goodbye handling
+                # Check for goodbye
                 if self._is_goodbye(response_text):
                     print(f"[CONV] {current.name} said goodbye")
-                    # Let the other bot optionally respond once, then stop
                     if current == self._alice:
                         current = self._bob
                         continue
-                    break
+                    else:
+                        break
 
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(0.5)
 
-                # Switch turns
+                # Switch to other bot
                 current = self._bob if current == self._alice else self._alice
 
             print(f"[CONV] Ended after {self.state.turn_count} turns")
@@ -439,29 +435,22 @@ class DailyBotService:
                 self.state.is_running = False
 
     async def _speak_and_wait(self, bot: BotPipeline, text: str):
-        """
-        Queue text to the persistent pipeline and wait for completion.
-
-        We do NOT rely solely on TTSStoppedFrame; some TTS stacks don’t emit it.
-        We always use a duration estimate as our primary timeout, and treat the
-        tracker as an early-finish signal when available.
-        """
+        """Queue text to the persistent pipeline and wait for completion."""
         bot.speech_done.clear()
 
-        print(f"[TTS] {bot.name} speaking: {text[:80]}")
-
-        # Queue into the running pipeline
+        print(f"[TTS] {bot.name} speaking: {text[:50]}...")
         await bot.task.queue_frames([TTSSpeakFrame(text=text)])
 
-        # Estimate duration (words / wps + padding)
+        # Wait for TTS to complete (with timeout); estimate as fallback
         words = max(1, len(text.split()))
-        est_seconds = (words / 2.5) + 0.8
+        est_seconds = (words / 2.5) + 1.0  # ~2.5 words/sec + padding
+        timeout = max(6.0, min(30.0, est_seconds + 10.0))
 
-        # If tracker fires early, great. Otherwise we proceed after estimate.
         try:
-            await asyncio.wait_for(bot.speech_done.wait(), timeout=est_seconds)
+            await asyncio.wait_for(bot.speech_done.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            pass
+            print(f"[TTS] {bot.name} timeout waiting for speech completion (using estimate)")
+            await asyncio.sleep(est_seconds)
 
         print(f"[TTS] {bot.name} done speaking")
 
@@ -488,47 +477,10 @@ class DailyBotService:
     async def _broadcast_message(self, message: dict):
         if message.get("type") == "message":
             data = message.get("data", {})
-            print(f"[BROADCAST] {data.get('speaker')}: {data.get('text', '')[:80]}")
+            print(f"[BROADCAST] {data.get('speaker')}: {data.get('text', '')[:50]}...")
 
         for queue in self._viewers.copy():
             try:
                 queue.put_nowait(message)
             except Exception:
                 pass
-
-    async def _cleanup(self):
-        """Stop tasks and delete room."""
-        # Stop conversation task
-        if self._conversation_task:
-            self._conversation_task.cancel()
-            try:
-                await self._conversation_task
-            except Exception:
-                pass
-            self._conversation_task = None
-
-        # Stop pipelines
-        for bot in (self._alice, self._bob):
-            if bot and bot.runner_task:
-                bot.runner_task.cancel()
-                try:
-                    await bot.runner_task
-                except Exception:
-                    pass
-                bot.runner_task = None
-
-        # Delete room
-        if self._room_manager and self._room_info:
-            try:
-                await self._room_manager.delete_room(self._room_info.room_name)
-                print("[SERVICE] Deleted room")
-            except Exception as e:
-                print(f"[SERVICE] Failed to delete room: {e}")
-
-        self._room_manager = None
-        self._room_info = None
-        self._alice = None
-        self._bob = None
-        self._factory = None
-        if self.state:
-            self.state.is_running = False

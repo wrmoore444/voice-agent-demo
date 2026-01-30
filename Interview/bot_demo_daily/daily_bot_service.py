@@ -5,9 +5,9 @@ DAILY BOT SERVICE - Sequential Turn-Based Bot Conversations
 
 Orchestrates turn-based bot-to-bot conversations:
 1. Alice speaks (text → TTS → Daily audio)
-2. Wait for playback complete
+2. Wait for estimated speech duration
 3. Bob speaks (text → TTS → Daily audio)
-4. Wait for playback complete
+4. Wait for estimated speech duration
 5. Repeat until conversation ends naturally
 
 No overlapping speech - guaranteed turn-taking.
@@ -28,8 +28,6 @@ from pipecat.frames.frames import TTSSpeakFrame, EndFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineTask, PipelineParams
 from pipecat.pipeline.runner import PipelineRunner
-from pipecat.processors.frame_processor import FrameProcessor
-from pipecat.frames.frames import Frame
 
 
 # Maximum turns before auto-stop (prevent infinite conversations)
@@ -41,21 +39,16 @@ GOODBYE_PHRASES = [
     "talk to you later", "see you", "farewell"
 ]
 
+# Estimated words per second for TTS (used to calculate wait time)
+WORDS_PER_SECOND = 2.5
 
-class SpeechCompleteNotifier(FrameProcessor):
-    """Processor that signals when speech is complete."""
 
-    def __init__(self, on_complete: asyncio.Event):
-        super().__init__()
-        self._on_complete = on_complete
-        self._speaking = False
-
-    async def process_frame(self, frame: Frame, direction):
-        await self.push_frame(frame, direction)
-
-        # Detect end of speech
-        if isinstance(frame, EndFrame):
-            self._on_complete.set()
+def estimate_speech_duration(text: str) -> float:
+    """Estimate how long it takes to speak the text."""
+    words = len(text.split())
+    duration = words / WORDS_PER_SECOND
+    # Add buffer for TTS processing and network latency
+    return max(duration + 1.0, 2.0)
 
 
 @dataclass
@@ -92,7 +85,6 @@ class BotPipeline:
     tts: ElevenLabsTTSService
     task: PipelineTask
     runner_task: Optional[asyncio.Task] = None
-    speech_complete: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class DailyBotService:
@@ -217,10 +209,8 @@ class DailyBotService:
     ) -> BotPipeline:
         """Create a persistent pipeline for a bot."""
         config = self._factory.create_bot_config(name, system_prompt)
-        speech_complete = asyncio.Event()
 
-        # Create transport
-        # audio_in_enabled=True is required to keep the transport connected
+        # Create transport - audio_in keeps the connection alive
         transport = DailyTransport(
             room_url,
             token,
@@ -238,15 +228,11 @@ class DailyBotService:
         # Create TTS
         tts = self._factory.create_tts_service(config)
 
-        # Create notifier to detect speech completion
-        notifier = SpeechCompleteNotifier(speech_complete)
-
-        # Build pipeline: Input (keeps connected) → TTS → Notifier → Output
-        # The transport.input() is essential - it keeps the pipeline running
+        # Build pipeline: Input → TTS → Output
+        # Input keeps connection alive, TTS processes TTSSpeakFrames, Output sends audio
         pipeline = Pipeline([
             transport.input(),
             tts,
-            notifier,
             transport.output(),
         ])
 
@@ -264,7 +250,6 @@ class DailyBotService:
             transport=transport,
             tts=tts,
             task=task,
-            speech_complete=speech_complete,
         )
 
     async def _run_pipeline(self, bot: BotPipeline):
@@ -301,7 +286,6 @@ class DailyBotService:
         # Cancel pipeline runners
         for bot in [self._alice, self._bob]:
             if bot and bot.runner_task and not bot.runner_task.done():
-                # Send EndFrame to gracefully stop
                 await bot.task.queue_frames([EndFrame()])
                 bot.runner_task.cancel()
                 try:
@@ -365,13 +349,12 @@ class DailyBotService:
                     "timestamp": datetime.utcnow().isoformat(),
                 })
 
-                # Speak the response and wait for completion
+                # Speak the response and wait for estimated completion
                 await self._speak_and_wait(current_bot, response_text)
 
                 # Check for goodbye
                 if self._is_goodbye(response_text):
                     print(f"[CONV] {current_bot.name} said goodbye")
-                    # Give the other person a chance to say goodbye
                     if current_bot == self._alice:
                         current_bot = self._bob
                         continue
@@ -396,21 +379,18 @@ class DailyBotService:
             self.state.is_running = False
 
     async def _speak_and_wait(self, bot: BotPipeline, text: str) -> None:
-        """Queue text to speak and wait for completion."""
+        """Queue text to speak and wait for estimated completion."""
         try:
-            # Reset the completion event
-            bot.speech_complete.clear()
-
             # Queue the text
             print(f"[TTS] {bot.name} speaking: {text[:50]}...")
             await bot.task.queue_frames([TTSSpeakFrame(text=text)])
 
-            # Wait for speech to complete (with timeout)
-            try:
-                await asyncio.wait_for(bot.speech_complete.wait(), timeout=30.0)
-                print(f"[TTS] {bot.name} finished speaking")
-            except asyncio.TimeoutError:
-                print(f"[TTS] {bot.name} speech timeout")
+            # Wait for estimated speech duration
+            duration = estimate_speech_duration(text)
+            print(f"[TTS] {bot.name} waiting {duration:.1f}s for speech...")
+            await asyncio.sleep(duration)
+
+            print(f"[TTS] {bot.name} finished speaking")
 
         except Exception as e:
             print(f"[TTS] Error speaking: {e}")

@@ -1,0 +1,18 @@
+pipecat-ai[silero,websocket,google,local-smart-turn-v3,webrtc]==0.0.92
+# Note: For Daily WebRTC support, also install on Linux/macOS:
+# pip install pipecat-ai[daily]==0.0.92
+# daily-python is not available on Windows
+aiortc
+fastapi
+uvicorn
+elevenlabs
+websockets
+python-dotenv
+python-multipart
+aiohttp
+sqlalchemy
+aiosqlite
+aiomysql
+asyncpg
+aiosmtplib
+google-generativeai

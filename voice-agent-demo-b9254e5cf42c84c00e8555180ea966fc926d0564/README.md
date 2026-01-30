@@ -91,12 +91,13 @@ python main.py
 
 ### 6. Open the Demo
 
-Open your browser to: **http://localhost:8001**
+Open your browser to one of these URLs:
 
-You'll see a landing page with three demo options:
-- **Pipecat Bot-to-Bot** - Text-based with optional ElevenLabs audio
-- **Daily Bot-to-Bot** - Real-time WebRTC voice conversation
-- **Talk to Alice** - Human voice conversation with an AI agent
+| Demo | URL |
+|------|-----|
+| **Pipecat Bot-to-Bot** | http://localhost:8001/pipecat-demo/viewer |
+| **Daily Bot-to-Bot** | http://localhost:8001/daily-demo/viewer |
+| **Talk to Alice** | http://localhost:8001/human-demo/viewer |
 
 ## Demo Descriptions
 

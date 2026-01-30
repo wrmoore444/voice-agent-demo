@@ -3639,4 +3639,5 @@ async def daily_demo_viewer_page():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8001)
+    # Bind to 0.0.0.0 so Windows browser can access when running in WSL
+    uvicorn.run(app, host="0.0.0.0", port=8001)

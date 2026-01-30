@@ -223,7 +223,6 @@
         </div>
 
         <div class="controls">
-            <input type="text" id="topic" placeholder="Enter conversation topic..." value="artificial intelligence">
             <button class="btn-start" onclick="startDemo()">Start</button>
             <button class="btn-stop" onclick="stopDemo()">Stop</button>
             <button class="btn-clear" onclick="clearMessages()">Clear</button>
@@ -236,7 +235,7 @@
         <div id="conversation" class="conversation">
             <div class="empty-state">
                 <p>No conversation yet.</p>
-                <p>Connect to a server, enter a topic, and click Start to begin.</p>
+                <p>Connect to a server and click Start to begin.</p>
             </div>
         </div>
     </div>
@@ -331,14 +330,13 @@
         }
 
         async function startDemo() {
-            const topic = document.getElementById('topic').value || 'artificial intelligence';
             try {
-                const response = await fetch(`${serverUrl}/demo/start?topic=${encodeURIComponent(topic)}`, {
+                const response = await fetch(`${serverUrl}/demo/start`, {
                     method: 'POST'
                 });
                 const data = await response.json();
                 if (response.ok) {
-                    statusDiv.textContent = `Started - Topic: ${topic}`;
+                    statusDiv.textContent = 'Started';
                     statusDiv.className = 'status connected';
                 } else {
                     alert(data.detail || 'Failed to start demo');
@@ -368,7 +366,7 @@
             conversationDiv.innerHTML = `
                 <div class="empty-state">
                     <p>No conversation yet.</p>
-                    <p>Connect to a server, enter a topic, and click Start to begin.</p>
+                    <p>Connect to a server and click Start to begin.</p>
                 </div>
             `;
         }

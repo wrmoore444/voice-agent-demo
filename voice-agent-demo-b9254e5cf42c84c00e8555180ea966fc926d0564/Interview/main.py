@@ -1203,7 +1203,6 @@ async def demo_viewer_page():
         <h1>Bot-to-Bot Conversation</h1>
 
         <div class="controls">
-            <input type="text" id="topic" placeholder="Enter conversation topic..." value="artificial intelligence">
             <button class="btn-start" onclick="startDemo()">Start</button>
             <button class="btn-stop" onclick="stopDemo()">Stop</button>
             <button class="btn-clear" onclick="clearMessages()">Clear</button>
@@ -1220,7 +1219,7 @@ async def demo_viewer_page():
         <div id="conversation" class="conversation">
             <div class="empty-state">
                 <p>No conversation yet.</p>
-                <p>Enter a topic and click Start to begin.</p>
+                <p>Click Start to begin.</p>
             </div>
         </div>
     </div>
@@ -1467,14 +1466,13 @@ async def demo_viewer_page():
             scheduledEndTime = 0;
             isPlaying = false;
             pendingAudioCount = 0;
-            const topic = document.getElementById('topic').value || 'artificial intelligence';
             try {
-                const response = await fetch(`/demo/start?topic=${encodeURIComponent(topic)}`, {
+                const response = await fetch('/demo/start', {
                     method: 'POST'
                 });
                 const data = await response.json();
                 if (response.ok) {
-                    statusDiv.innerHTML = `Started - Topic: ${topic}`;
+                    statusDiv.innerHTML = 'Started';
                 } else {
                     alert(data.detail || 'Failed to start demo');
                 }
@@ -1509,7 +1507,7 @@ async def demo_viewer_page():
             conversationDiv.innerHTML = `
                 <div class="empty-state">
                     <p>No conversation yet.</p>
-                    <p>Enter a topic and click Start to begin.</p>
+                    <p>Click Start to begin.</p>
                 </div>
             `;
         }
@@ -2032,7 +2030,6 @@ async def pipecat_demo_viewer_page():
         </div>
 
         <div class="controls">
-            <input type="text" id="topic" placeholder="Enter conversation topic (optional)..." value="">
             <button class="btn-start" onclick="startDemo()">Start</button>
             <button class="btn-stop" onclick="stopDemo()">Stop</button>
             <button class="btn-clear" onclick="clearMessages()">Clear</button>
@@ -2286,7 +2283,6 @@ async def pipecat_demo_viewer_page():
         }
 
         async function startDemo() {
-            const topic = document.getElementById('topic').value;
             const alice = document.getElementById('alicePersona').value;
             const bob = document.getElementById('bobPersona').value;
             const enableAudio = document.getElementById('audioEnabled').checked;
@@ -2298,7 +2294,6 @@ async def pipecat_demo_viewer_page():
 
             // Build query string
             const params = new URLSearchParams();
-            if (topic) params.append('topic', topic);
             if (alice) params.append('alice', alice);
             if (bob) params.append('bob', bob);
             params.append('enable_audio', enableAudio);
@@ -3390,7 +3385,6 @@ async def daily_demo_viewer_page():
         </div>
 
         <div class="controls">
-            <input type="text" id="topic" placeholder="Conversation topic (optional)...">
             <button class="btn-start" onclick="startDemo()">Start</button>
             <button class="btn-stop" onclick="stopDemo()">Stop</button>
             <button class="btn-clear" onclick="clearMessages()">Clear</button>
@@ -3514,12 +3508,10 @@ async def daily_demo_viewer_page():
         }
 
         async function startDemo() {
-            const topic = document.getElementById('topic').value;
             const alice = document.getElementById('alicePersona').value;
             const bob = document.getElementById('bobPersona').value;
 
             const params = new URLSearchParams();
-            if (topic) params.append('topic', topic);
             if (alice) params.append('alice', alice);
             if (bob) params.append('bob', bob);
 

@@ -9,11 +9,9 @@ for native audio LLM processing.
 
 PIPELINE STRUCTURE:
 -------------------
-    DailyTransport.input() → transcript.user() → GeminiLiveLLMService →
-    transcript.assistant() → DailyTransport.output()
-
-NOTE: Context aggregator removed to reduce latency. Gemini Live handles
-audio streaming natively without needing text-based context accumulation.
+    DailyTransport.input() → context_aggregator.user() → transcript.user() →
+    GeminiLiveLLMService → transcript.assistant() → DailyTransport.output() →
+    context_aggregator.assistant()
 
 GEMINI VOICE CONFIGURATION:
 ---------------------------
@@ -188,20 +186,25 @@ class BotPipelineFactory:
                         if should_flush:
                             await flush_buffer()
 
-        # NOTE: Context aggregator removed to reduce latency.
-        # Gemini Live handles audio streaming natively.
-        # Original code (for rollback):
-        # messages = [{"role": "user", "content": "Please begin the conversation according to your persona."}]
-        # context = OpenAILLMContext(messages)
-        # context_aggregator = llm.create_context_aggregator(context)
+        # Create context for LLM
+        messages = [
+            {
+                "role": "user",
+                "content": "Please begin the conversation according to your persona."
+            }
+        ]
+        context = OpenAILLMContext(messages)
+        context_aggregator = llm.create_context_aggregator(context)
 
-        # Build pipeline - simplified for lower latency
+        # Build pipeline
         pipeline = Pipeline([
             transport.input(),
+            context_aggregator.user(),
             transcript.user(),
             llm,
             transcript.assistant(),
             transport.output(),
+            context_aggregator.assistant(),
         ])
 
         # Create pipeline task

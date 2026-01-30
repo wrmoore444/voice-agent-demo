@@ -331,12 +331,21 @@ class DailyBotService:
             transport.output(),
         ])
 
-        task = PipelineTask(
-            pipeline,
-            PipelineParams(
-                allow_interruptions=False,
-            ),
-        )
+        try:
+            # Some pipecat versions accept keyword "params"
+            task = PipelineTask(
+                pipeline,
+                params=PipelineParams(
+                    allow_interruptions=False,
+                ),
+            )
+        except TypeError:
+            # Older pipecat versions: only PipelineTask(pipeline)
+            task = PipelineTask(pipeline)
+
+            # Best-effort: some versions support setting params after construction
+            if hasattr(task, "set_params"):
+                task.set_params(PipelineParams(allow_interruptions=False))
 
         return BotPipeline(
             name=name,

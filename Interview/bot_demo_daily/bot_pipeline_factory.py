@@ -13,25 +13,19 @@ No continuous streaming - full control over turn-taking.
 
 import os
 import asyncio
-from typing import Callable, Optional, Awaitable, List, Dict, Any
-from datetime import datetime
+from typing import List, Dict
 from dataclasses import dataclass, field
 
 import google.generativeai as genai
-from google.generativeai.types import GenerateContentResponse
 
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
-from pipecat.services.google import GoogleTTSService
-from pipecat.frames.frames import TTSSpeakFrame, EndFrame
-from pipecat.pipeline.pipeline import Pipeline
-from pipecat.pipeline.task import PipelineTask, PipelineParams
-from pipecat.pipeline.runner import PipelineRunner
+from pipecat.services.elevenlabs import ElevenLabsTTSService
 
 
-# Voice configurations for each bot
-GOOGLE_TTS_VOICES = {
-    "Alice": "en-US-Studio-O",  # Female
-    "Bob": "en-US-Studio-M",    # Male
+# ElevenLabs voice IDs for each bot
+ELEVENLABS_VOICES = {
+    "Alice": "21m00Tcm4TlvDq8ikWAM",  # Rachel - female
+    "Bob": "ErXwobaYiN019PkySvjV",    # Antoni - male
 }
 
 
@@ -56,7 +50,6 @@ class TextLLMService:
 
     async def generate(self, system_prompt: str, conversation_history: List[Dict[str, str]]) -> str:
         """Generate a text response given system prompt and conversation history."""
-        # Build the full prompt
         full_prompt = f"{system_prompt}\n\nConversation so far:\n"
         for msg in conversation_history:
             full_prompt += f"{msg['speaker']}: {msg['text']}\n"
@@ -76,22 +69,17 @@ class TextLLMService:
 class TurnBasedBotFactory:
     """
     Factory for creating turn-based bot conversations.
-
-    Instead of continuous streaming, this gives full control:
-    - Generate text response
-    - Convert to speech
-    - Play audio
-    - Wait for completion
-    - Next turn
     """
 
     def __init__(self):
         self.llm = TextLLMService()
-        self._google_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        self._elevenlabs_api_key = os.getenv("ELEVENLABS_API_KEY")
+        if not self._elevenlabs_api_key:
+            raise ValueError("ELEVENLABS_API_KEY not set")
 
     def create_bot_config(self, name: str, system_prompt: str) -> BotConfig:
         """Create a bot configuration."""
-        voice_id = GOOGLE_TTS_VOICES.get(name, "en-US-Studio-O")
+        voice_id = ELEVENLABS_VOICES.get(name, ELEVENLABS_VOICES["Alice"])
         return BotConfig(
             name=name,
             system_prompt=system_prompt,
@@ -105,71 +93,9 @@ class TurnBasedBotFactory:
         print(f"[LLM] {bot.name} generated: {text[:100]}...")
         return text
 
-    def create_tts_service(self, bot: BotConfig) -> GoogleTTSService:
-        """Create a TTS service for this bot."""
-        return GoogleTTSService(
-            api_key=self._google_api_key,
+    def create_tts_service(self, bot: BotConfig) -> ElevenLabsTTSService:
+        """Create an ElevenLabs TTS service for this bot."""
+        return ElevenLabsTTSService(
+            api_key=self._elevenlabs_api_key,
             voice_id=bot.voice_id,
-        )
-
-    async def speak_text(
-        self,
-        transport: DailyTransport,
-        bot: BotConfig,
-        text: str,
-    ) -> None:
-        """
-        Speak the given text through the Daily transport.
-
-        Creates a simple pipeline: TTS → Transport output
-        Waits for audio playback to complete.
-        """
-        tts = self.create_tts_service(bot)
-
-        # Create a simple output-only pipeline
-        pipeline = Pipeline([
-            tts,
-            transport.output(),
-        ])
-
-        task = PipelineTask(
-            pipeline,
-            params=PipelineParams(
-                allow_interruptions=False,
-                enable_metrics=False,
-            ),
-        )
-
-        # Queue the text to speak
-        await task.queue_frames([
-            TTSSpeakFrame(text=text),
-            EndFrame(),
-        ])
-
-        # Run until complete
-        runner = PipelineRunner(handle_sigint=False)
-        await runner.run(task)
-
-        print(f"[TTS] {bot.name} finished speaking")
-
-
-class SimpleDailyTransport:
-    """
-    Simplified Daily transport for audio output only.
-    """
-
-    @staticmethod
-    def create(room_url: str, token: str, bot_name: str) -> DailyTransport:
-        """Create a Daily transport configured for output only."""
-        return DailyTransport(
-            room_url,
-            token,
-            bot_name,
-            DailyParams(
-                audio_in_enabled=False,   # No input needed
-                audio_out_enabled=True,
-                audio_out_sample_rate=24000,
-                vad_enabled=False,
-                transcription_enabled=False,
-            ),
         )

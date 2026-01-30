@@ -23,7 +23,7 @@ from .bot_pipeline_factory import TurnBasedBotFactory, BotConfig
 from .persona_loader import load_persona, get_default_personas
 
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
-from pipecat.services.google import GoogleTTSService
+from pipecat.services.elevenlabs import ElevenLabsTTSService
 from pipecat.frames.frames import TTSSpeakFrame, EndFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineTask, PipelineParams
@@ -89,7 +89,7 @@ class BotPipeline:
     name: str
     config: BotConfig
     transport: DailyTransport
-    tts: GoogleTTSService
+    tts: ElevenLabsTTSService
     task: PipelineTask
     runner_task: Optional[asyncio.Task] = None
     speech_complete: asyncio.Event = field(default_factory=asyncio.Event)

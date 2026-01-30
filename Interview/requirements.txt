@@ -1,8 +1,8 @@
 # Daily Bot-to-Bot Demo Requirements
 
-# Pipecat AI framework with Daily WebRTC support
+# Pipecat AI framework with Daily WebRTC and ElevenLabs TTS
 # Note: daily-python only works on Linux/macOS, not Windows
-pipecat-ai[google,daily]==0.0.92
+pipecat-ai[daily,elevenlabs]==0.0.92
 
 # Google Generative AI for text generation
 google-generativeai

@@ -28,7 +28,6 @@ from loguru import logger
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.task import PipelineTask, PipelineParams
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
 from pipecat.transcriptions.language import Language
 from pipecat.frames.frames import LLMRunFrame, TranscriptionMessage
@@ -82,13 +81,9 @@ class BotPipelineFactory:
         """
         voice_id = GEMINI_VOICES.get(bot_name, "Aoede")
 
-        # Create Daily transport with VAD
-        vad_params = VADParams(
-            min_volume=0.4,
-            start_secs=0.1,
-            stop_secs=0.1,
-            confidence=0.7,
-        )
+        # Create Daily transport WITHOUT VAD
+        # For bot-to-bot conversations, we rely on Gemini Live's native turn detection
+        # VAD causes issues with two bots trying to respond simultaneously
         transport = DailyTransport(
             room_url,
             token,
@@ -98,8 +93,8 @@ class BotPipelineFactory:
                 audio_out_enabled=True,
                 audio_in_sample_rate=16000,
                 audio_out_sample_rate=24000,
-                vad_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(params=vad_params),
+                vad_enabled=False,
+                vad_analyzer=None,
                 transcription_enabled=False,
             ),
         )
@@ -206,10 +201,11 @@ class BotPipelineFactory:
         ])
 
         # Create pipeline task
+        # Disable interruptions for clean turn-taking in bot-to-bot conversations
         task = PipelineTask(
             pipeline,
             params=PipelineParams(
-                allow_interruptions=True,
+                allow_interruptions=False,
                 enable_metrics=False,
             ),
         )

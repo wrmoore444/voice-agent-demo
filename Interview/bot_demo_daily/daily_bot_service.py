@@ -1,54 +1,48 @@
 """
 =============================================================================
-DAILY BOT SERVICE - Main Orchestration for Daily WebRTC Bot Conversations
+DAILY BOT SERVICE - Sequential Turn-Based Bot Conversations
 =============================================================================
 
-This is the main service class that orchestrates bot-to-bot conversations
-via Daily.co WebRTC. It manages:
+Orchestrates turn-based bot-to-bot conversations:
+1. Alice speaks (text → TTS → Daily audio)
+2. Wait for playback complete
+3. Bob speaks (text → TTS → Daily audio)
+4. Wait for playback complete
+5. Repeat until conversation ends naturally
 
-1. Room lifecycle (create, cleanup)
-2. Bot pipeline creation and management
-3. Conversation flow (Alice speaks first, natural turn-taking via VAD)
-4. WebSocket viewer management for transcript streaming
-
-ARCHITECTURE:
--------------
-                    ┌─────────────────────────────────────┐
-                    │        DAILY WEBRTC ROOM            │
-                    │   (Both bots join as participants)  │
-                    └─────────────────────────────────────┘
-                            ▲                    ▲
-                            │ audio              │ audio
-              ┌─────────────┴────────┐  ┌───────┴─────────────┐
-              │    ALICE BOT         │  │    BOB BOT          │
-              │   (DailyTransport)   │  │   (DailyTransport)  │
-              │                      │  │                     │
-              │  Daily Input         │  │  Daily Input        │
-              │       ↓              │  │       ↓             │
-              │  GeminiLiveLLM       │  │  GeminiLiveLLM      │
-              │       ↓              │  │       ↓             │
-              │  Daily Output        │  │  Daily Output       │
-              └──────────────────────┘  └─────────────────────┘
+No overlapping speech - guaranteed turn-taking.
 """
 
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Set
-from loguru import logger
-
-from pipecat.pipeline.runner import PipelineRunner
 
 from .daily_room_manager import DailyRoomManager, RoomInfo
-from .bot_pipeline_factory import BotPipelineFactory, BotContext
-
-# Local persona loader
+from .bot_pipeline_factory import TurnBasedBotFactory, BotConfig, SimpleDailyTransport
 from .persona_loader import load_persona, Persona, get_default_personas
+
+from pipecat.transports.daily.transport import DailyTransport
+from pipecat.services.google import GoogleTTSService
+from pipecat.frames.frames import TTSSpeakFrame, EndFrame, AudioRawFrame
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.task import PipelineTask, PipelineParams
+from pipecat.pipeline.runner import PipelineRunner
+
+
+# Maximum turns before auto-stop (prevent infinite conversations)
+MAX_TURNS = 20
+
+# Goodbye phrases that signal conversation end
+GOODBYE_PHRASES = [
+    "goodbye", "bye", "take care", "have a great day",
+    "talk to you later", "see you", "farewell"
+]
 
 
 @dataclass
 class ConversationState:
-    """Tracks the current state of a Daily bot-to-bot conversation."""
+    """Tracks the current state of a conversation."""
     topic: str = ""
     started_at: datetime = field(default_factory=datetime.utcnow)
     is_running: bool = False
@@ -56,9 +50,9 @@ class ConversationState:
     bob_persona: Optional[str] = None
     room_url: Optional[str] = None
     room_name: Optional[str] = None
+    turn_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
         return {
             "topic": self.topic,
             "started_at": self.started_at.isoformat() if self.started_at else None,
@@ -67,28 +61,28 @@ class ConversationState:
             "bob_persona": self.bob_persona,
             "room_url": self.room_url,
             "room_name": self.room_name,
+            "turn_count": self.turn_count,
         }
 
 
 class DailyBotService:
     """
-    Main orchestrator for Daily WebRTC bot-to-bot conversations.
+    Orchestrates sequential turn-based bot conversations.
     """
 
     def __init__(self):
-        """Initialize the Daily bot service."""
         self.state: Optional[ConversationState] = None
         self._room_manager: Optional[DailyRoomManager] = None
         self._room_info: Optional[RoomInfo] = None
-        self._pipeline_factory: Optional[BotPipelineFactory] = None
-        self._alice: Optional[BotContext] = None
-        self._bob: Optional[BotContext] = None
-        self._alice_runner_task: Optional[asyncio.Task] = None
-        self._bob_runner_task: Optional[asyncio.Task] = None
-        self._alice_persona: Optional[Persona] = None
-        self._bob_persona: Optional[Persona] = None
+        self._factory: Optional[TurnBasedBotFactory] = None
+        self._alice_config: Optional[BotConfig] = None
+        self._bob_config: Optional[BotConfig] = None
+        self._alice_transport: Optional[DailyTransport] = None
+        self._bob_transport: Optional[DailyTransport] = None
+        self._conversation_task: Optional[asyncio.Task] = None
         self._viewers: Set[asyncio.Queue] = set()
         self._conversation_history: List[Dict[str, Any]] = []
+        self._stop_requested: bool = False
 
     async def start(
         self,
@@ -96,31 +90,28 @@ class DailyBotService:
         alice_persona: Optional[str] = None,
         bob_persona: Optional[str] = None,
     ) -> bool:
-        """
-        Start a new Daily bot-to-bot conversation.
-        """
+        """Start a new turn-based conversation."""
         if self.state and self.state.is_running:
             print("[SERVICE] Conversation already running")
             return False
 
         try:
-            # Step 1: Load personas
+            # Load personas
             default_alice, default_bob = get_default_personas()
             alice_file = alice_persona or default_alice
             bob_file = bob_persona or default_bob
 
-            self._alice_persona = load_persona(alice_file)
-            self._bob_persona = load_persona(bob_file)
+            alice_persona_data = load_persona(alice_file)
+            bob_persona_data = load_persona(bob_file)
 
-            print(f"[SERVICE] Loaded personas: Alice={self._alice_persona.name}, Bob={self._bob_persona.name}")
+            print(f"[SERVICE] Loaded: Alice={alice_persona_data.name}, Bob={bob_persona_data.name}")
 
-            # Step 2: Create Daily room
+            # Create Daily room
             self._room_manager = DailyRoomManager()
             self._room_info = await self._room_manager.create_room()
+            print(f"[SERVICE] Created room: {self._room_info.room_url}")
 
-            print(f"[SERVICE] Created Daily room: {self._room_info.room_url}")
-
-            # Step 3: Initialize state
+            # Initialize state
             self.state = ConversationState(
                 topic=topic,
                 started_at=datetime.utcnow(),
@@ -132,71 +123,40 @@ class DailyBotService:
             )
 
             self._conversation_history.clear()
+            self._stop_requested = False
 
-            # Step 4: Create pipeline factory
-            self._pipeline_factory = BotPipelineFactory()
+            # Create factory and bot configs
+            self._factory = TurnBasedBotFactory()
 
-            # Step 5: Create Alice's pipeline
-            alice_system_prompt = self._alice_persona.generate_system_prompt()
-            alice_system_prompt += "\n\nYou are starting this conversation. Keep responses to 1-2 short sentences."
-            alice_system_prompt += "\n\nIMPORTANT: When ending the conversation, say goodbye ONCE and then stay silent. Do not keep responding to goodbyes."
+            alice_prompt = alice_persona_data.generate_system_prompt()
+            alice_prompt += "\n\nYou are starting this conversation. Keep responses to 1-2 short sentences."
             if topic:
-                alice_system_prompt += f"\n\nThe conversation topic is: {topic}"
+                alice_prompt += f"\n\nConversation topic: {topic}"
 
-            alice_transport, alice_task, alice_transcript = self._pipeline_factory.create_pipeline(
-                bot_name="Alice",
-                room_url=self._room_info.room_url,
-                token=self._room_info.alice_token,
-                system_prompt=alice_system_prompt,
-                broadcast_callback=self._broadcast_message,
-            )
-
-            self._alice = BotContext(
-                name="Alice",
-                transport=alice_transport,
-                task=alice_task,
-                transcript=alice_transcript,
-            )
-
-            # Step 6: Create Bob's pipeline
-            bob_system_prompt = self._bob_persona.generate_system_prompt()
-            bob_system_prompt += "\n\nKeep responses to 1-2 short sentences. Be conversational."
-            bob_system_prompt += "\n\nIMPORTANT: When ending the conversation, say goodbye ONCE and then stay silent. Do not keep responding to goodbyes."
+            bob_prompt = bob_persona_data.generate_system_prompt()
+            bob_prompt += "\n\nKeep responses to 1-2 short sentences. Be conversational."
             if topic:
-                bob_system_prompt += f"\n\nThe conversation topic is: {topic}"
+                bob_prompt += f"\n\nConversation topic: {topic}"
 
-            bob_transport, bob_task, bob_transcript = self._pipeline_factory.create_pipeline(
-                bot_name="Bob",
-                room_url=self._room_info.room_url,
-                token=self._room_info.bob_token,
-                system_prompt=bob_system_prompt,
-                broadcast_callback=self._broadcast_message,
+            self._alice_config = self._factory.create_bot_config("Alice", alice_prompt)
+            self._bob_config = self._factory.create_bot_config("Bob", bob_prompt)
+
+            # Create Daily transports
+            self._alice_transport = SimpleDailyTransport.create(
+                self._room_info.room_url,
+                self._room_info.alice_token,
+                "Alice"
+            )
+            self._bob_transport = SimpleDailyTransport.create(
+                self._room_info.room_url,
+                self._room_info.bob_token,
+                "Bob"
             )
 
-            self._bob = BotContext(
-                name="Bob",
-                transport=bob_transport,
-                task=bob_task,
-                transcript=bob_transcript,
-            )
+            # Start the conversation loop in background
+            self._conversation_task = asyncio.create_task(self._conversation_loop())
 
-            # Step 7: Start pipeline runners in background
-            print("[SERVICE] Starting pipeline runners...")
-            self._alice_runner_task = asyncio.create_task(
-                self._run_bot_pipeline(self._alice, "Alice")
-            )
-            self._bob_runner_task = asyncio.create_task(
-                self._run_bot_pipeline(self._bob, "Bob")
-            )
-
-            # Step 8: Wait for bots to join and trigger Alice
-            print("[SERVICE] Waiting for bots to join room...")
-            await asyncio.sleep(2.0)
-
-            print("[SERVICE] Triggering Alice to speak...")
-            await self._alice.trigger_opening()
-
-            print(f"[SERVICE] ✓ Conversation started: {self._room_info.room_url}")
+            print(f"[SERVICE] ✓ Conversation started")
             return True
 
         except Exception as e:
@@ -209,71 +169,178 @@ class DailyBotService:
             return False
 
     async def stop(self) -> bool:
-        """Stop the current conversation gracefully."""
+        """Stop the conversation."""
         if not self.state or not self.state.is_running:
             return False
 
-        print("[SERVICE] Stopping conversation...")
+        print("[SERVICE] Stop requested...")
+        self._stop_requested = True
         self.state.is_running = False
+
+        if self._conversation_task and not self._conversation_task.done():
+            self._conversation_task.cancel()
+            try:
+                await asyncio.wait_for(self._conversation_task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+
         await self._cleanup()
         print("[SERVICE] Conversation stopped")
         return True
 
     async def _cleanup(self):
-        """Clean up all resources."""
-        for task, name in [
-            (self._alice_runner_task, "Alice"),
-            (self._bob_runner_task, "Bob")
-        ]:
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await asyncio.wait_for(task, timeout=5.0)
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass
-
-        self._alice_runner_task = None
-        self._bob_runner_task = None
-
+        """Clean up resources."""
         if self._room_manager and self._room_info:
             try:
                 await self._room_manager.delete_room(self._room_info.room_name)
             except Exception as e:
                 print(f"[SERVICE] Error deleting room: {e}")
 
-        self._alice = None
-        self._bob = None
+        self._alice_transport = None
+        self._bob_transport = None
         self._room_info = None
 
-    async def _run_bot_pipeline(self, bot: BotContext, name: str):
-        """Run a bot's pipeline in the background."""
+    async def _conversation_loop(self):
+        """
+        Main conversation loop - alternates between Alice and Bob.
+        """
         try:
-            print(f"[PIPELINE] {name} starting...")
-            runner = PipelineRunner(handle_sigint=False)
-            await runner.run(bot.task)
-            print(f"[PIPELINE] {name} finished")
+            # Wait for transports to connect
+            print("[CONV] Waiting for bots to join room...")
+            await asyncio.sleep(2.0)
+
+            # Alice starts
+            current_speaker = "Alice"
+
+            while not self._stop_requested and self.state.turn_count < MAX_TURNS:
+                self.state.turn_count += 1
+                print(f"[CONV] Turn {self.state.turn_count}: {current_speaker}")
+
+                # Get the current bot's config and transport
+                if current_speaker == "Alice":
+                    config = self._alice_config
+                    transport = self._alice_transport
+                else:
+                    config = self._bob_config
+                    transport = self._bob_transport
+
+                # Update bot's conversation history
+                config.conversation_history = [
+                    {"speaker": h["speaker"], "text": h["text"]}
+                    for h in self._conversation_history
+                ]
+
+                # Generate response
+                response_text = await self._factory.generate_response(config)
+
+                if not response_text:
+                    print(f"[CONV] {current_speaker} generated empty response, ending")
+                    break
+
+                # Broadcast to viewers
+                await self._broadcast_message({
+                    "type": "message",
+                    "data": {
+                        "speaker": current_speaker,
+                        "text": response_text,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                })
+
+                # Add to conversation history
+                self._conversation_history.append({
+                    "speaker": current_speaker,
+                    "text": response_text,
+                    "timestamp": datetime.utcnow().isoformat(),
+                })
+
+                # Speak the response
+                await self._speak_text(transport, config, response_text)
+
+                # Check for goodbye
+                if self._is_goodbye(response_text):
+                    print(f"[CONV] {current_speaker} said goodbye, ending conversation")
+                    # Give the other person a chance to say goodbye
+                    if current_speaker == "Alice":
+                        current_speaker = "Bob"
+                        continue
+                    else:
+                        break
+
+                # Small pause between turns
+                await asyncio.sleep(0.5)
+
+                # Switch speaker
+                current_speaker = "Bob" if current_speaker == "Alice" else "Alice"
+
+            print(f"[CONV] Conversation ended after {self.state.turn_count} turns")
+
         except asyncio.CancelledError:
-            print(f"[PIPELINE] {name} cancelled")
+            print("[CONV] Conversation cancelled")
         except Exception as e:
-            print(f"[PIPELINE] {name} error: {e}")
+            print(f"[CONV] Error in conversation loop: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.state.is_running = False
+
+    async def _speak_text(
+        self,
+        transport: DailyTransport,
+        config: BotConfig,
+        text: str,
+    ) -> None:
+        """Speak text through the Daily transport using TTS."""
+        try:
+            tts = self._factory.create_tts_service(config)
+
+            pipeline = Pipeline([
+                tts,
+                transport.output(),
+            ])
+
+            task = PipelineTask(
+                pipeline,
+                params=PipelineParams(
+                    allow_interruptions=False,
+                    enable_metrics=False,
+                ),
+            )
+
+            await task.queue_frames([
+                TTSSpeakFrame(text=text),
+                EndFrame(),
+            ])
+
+            runner = PipelineRunner(handle_sigint=False)
+            await runner.run(task)
+
+            print(f"[TTS] {config.name} finished speaking")
+
+        except Exception as e:
+            print(f"[TTS] Error speaking: {e}")
             import traceback
             traceback.print_exc()
 
+    def _is_goodbye(self, text: str) -> bool:
+        """Check if the text contains a goodbye phrase."""
+        text_lower = text.lower()
+        return any(phrase in text_lower for phrase in GOODBYE_PHRASES)
+
     def get_state(self) -> Dict[str, Any]:
-        """Get the current conversation state."""
+        """Get current conversation state."""
         if not self.state:
             return {
                 "is_running": False,
                 "conversation_history": [],
             }
-
         return {
             **self.state.to_dict(),
             "conversation_history": self._conversation_history,
         }
 
     def register_viewer(self) -> asyncio.Queue:
-        """Register a new viewer."""
+        """Register a viewer for real-time updates."""
         queue = asyncio.Queue()
         self._viewers.add(queue)
         print(f"[VIEWER] Registered, total: {len(self._viewers)}")
@@ -285,10 +352,9 @@ class DailyBotService:
         print(f"[VIEWER] Unregistered, total: {len(self._viewers)}")
 
     async def _broadcast_message(self, message: dict):
-        """Broadcast a message to all connected viewers."""
+        """Broadcast a message to all viewers."""
         if message.get("type") == "message":
             data = message.get("data", {})
-            self._conversation_history.append(data)
             print(f"[BROADCAST] {data.get('speaker')}: {data.get('text', '')[:50]}...")
 
         for queue in self._viewers.copy():

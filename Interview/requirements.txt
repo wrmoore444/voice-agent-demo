@@ -2,7 +2,10 @@
 
 # Pipecat AI framework with Daily WebRTC support
 # Note: daily-python only works on Linux/macOS, not Windows
-pipecat-ai[silero,google,daily]==0.0.92
+pipecat-ai[google,daily]==0.0.92
+
+# Google Generative AI for text generation
+google-generativeai
 
 # Web framework
 fastapi

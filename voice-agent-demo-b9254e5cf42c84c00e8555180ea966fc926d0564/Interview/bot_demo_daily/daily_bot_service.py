@@ -291,6 +291,13 @@ class DailyBotService:
             self._conversation_history.append(data)
             print(f"[BROADCAST] {data.get('speaker')}: {data.get('text', '')[:50]}...")
 
+            # Detect terminal phrases and stop conversation immediately
+            text = (data.get("text") or "").lower()
+            if any(phrase in text for phrase in ["goodbye", "bye", "have a great day", "take care"]):
+                if self.state and self.state.is_running:
+                    print("[SERVICE] Terminal phrase detected; stopping conversation now.")
+                    asyncio.create_task(self.stop())
+
         for queue in self._viewers.copy():
             try:
                 queue.put_nowait(message)
